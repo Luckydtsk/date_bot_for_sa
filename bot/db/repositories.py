@@ -187,6 +187,27 @@ class ProfileRepo:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_all(self, *, offset: int = 0, limit: int = 10) -> list[Profile]:
+        stmt = (
+            select(Profile)
+            .where(Profile.is_complete.is_(True))
+            .order_by(Profile.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_complete(self) -> int:
+        return (
+            await self.session.scalar(
+                select(func.count())
+                .select_from(Profile)
+                .where(Profile.is_complete.is_(True))
+            )
+            or 0
+        )
+
 
 class LikeRepo:
     def __init__(self, session: AsyncSession) -> None:

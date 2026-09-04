@@ -152,6 +152,13 @@ UNBAN_USAGE = "Использование: /unban <telegram_id>"
 BAN_DONE = "Пользователь {tg_id} забанен."
 UNBAN_DONE = "Пользователь {tg_id} разбанен."
 USER_NOT_FOUND = "Пользователь не найден в базе."
+USERS_USAGE = "Использование: /users — список анкет, /user <telegram_id> — одна анкета."
+USERS_EMPTY = "Анкет пока нет."
+USERS_PAGE = "Анкеты {start}–{end} из {total}:"
+USER_LINE = (
+    "{n}. {name} · {gender} · {faculty}\n"
+    "   id {tg_id}{username}{flags}"
+)
 
 # --- Misc ---
 UNKNOWN = "Не понял. Жми кнопки меню или /start."

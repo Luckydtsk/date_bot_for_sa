@@ -43,7 +43,15 @@ class BanMiddleware(BaseMiddleware):
         # Админ-команды пропускаем только для реальных админов
         if is_admin and isinstance(event, Update) and event.message and event.message.text:
             cmd = event.message.text.split()[0].split("@")[0]
-            if cmd in {"/stats", "/broadcast", "/ban", "/unban"}:
+            if cmd in {
+                "/stats",
+                "/broadcast",
+                "/ban",
+                "/unban",
+                "/users",
+                "/user",
+                "/admin",
+            }:
                 return await handler(event, data)
 
         profile = await ProfileRepo(session).get_by_tg(user.id)
