@@ -37,7 +37,7 @@ class Profile(Base):
     dance_experience: Mapped[str] = mapped_column(String(16))  # none | some | confident
     goal: Mapped[str] = mapped_column(String(32))  # full_evening | waltz_tango | company
     about: Mapped[str] = mapped_column(String(400))
-    photo_file_id: Mapped[str] = mapped_column(String(256))
+    photo_file_id: Mapped[str] = mapped_column(String(512))
     contact: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # False = на паузе

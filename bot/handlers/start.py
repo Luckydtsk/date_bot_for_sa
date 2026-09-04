@@ -23,6 +23,17 @@ router = Router(name="start")
 DEFAULT_GOAL = "full_evening"
 
 
+async def _cancel_registration(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    await state.clear()
+    profile = await ProfileRepo(session).get_by_tg(message.from_user.id)
+    if profile and profile.is_complete:
+        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+    else:
+        await message.answer(t.REG_CANCELLED)
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
@@ -49,10 +60,9 @@ async def cmd_start(
 
 
 @router.message(Registration.name, F.text)
-async def reg_name(message: Message, state: FSMContext) -> None:
+async def reg_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     name = (message.text or "").strip()
     if len(name) < 1:
@@ -67,10 +77,9 @@ async def reg_name(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.gender, F.text)
-async def reg_gender(message: Message, state: FSMContext) -> None:
+async def reg_gender(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     gender = GENDER_MAP.get(message.text or "")
     if not gender:
@@ -82,10 +91,9 @@ async def reg_gender(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.faculty, F.text)
-async def reg_faculty(message: Message, state: FSMContext) -> None:
+async def reg_faculty(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     faculty = (message.text or "").strip()
     if len(faculty) < 2:
@@ -100,10 +108,9 @@ async def reg_faculty(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.height, F.text)
-async def reg_height(message: Message, state: FSMContext) -> None:
+async def reg_height(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     if message.text == t.SKIP:
         await state.update_data(height=None)
@@ -118,10 +125,9 @@ async def reg_height(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.dance, F.text)
-async def reg_dance(message: Message, state: FSMContext) -> None:
+async def reg_dance(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     dance = DANCE_MAP.get(message.text or "")
     if not dance:
@@ -133,10 +139,9 @@ async def reg_dance(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.about, F.text)
-async def reg_about(message: Message, state: FSMContext) -> None:
+async def reg_about(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     about = (message.text or "").strip()
     if len(about) < 5:
@@ -151,9 +156,8 @@ async def reg_about(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.photo, F.text == t.CANCEL)
-async def reg_photo_cancel(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(t.REG_CANCELLED)
+async def reg_photo_cancel(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    await _cancel_registration(message, state, session)
 
 
 @router.message(Registration.photo, F.photo)
@@ -178,8 +182,7 @@ async def reg_photo_invalid(message: Message) -> None:
 @router.message(Registration.contact, F.text)
 async def reg_contact(message: Message, state: FSMContext, session: AsyncSession) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.REG_CANCELLED)
+        await _cancel_registration(message, state, session)
         return
     if message.text == t.SKIP:
         await state.update_data(contact=None)

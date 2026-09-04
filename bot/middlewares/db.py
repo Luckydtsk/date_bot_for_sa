@@ -6,6 +6,7 @@ from aiogram.types import TelegramObject, Update, User
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot import texts as t
+from bot.config import Config
 from bot.db.repositories import ProfileRepo
 
 
@@ -36,14 +37,12 @@ class BanMiddleware(BaseMiddleware):
         if not user or not session:
             return await handler(event, data)
 
-        text: str | None = None
-        if isinstance(event, Update):
-            if event.message and event.message.text:
-                text = event.message.text
-            elif event.callback_query and event.callback_query.message:
-                pass
-        if text:
-            cmd = text.split()[0].split("@")[0]
+        config: Config | None = data.get("config")
+        is_admin = bool(config and user.id in config.admin_ids)
+
+        # Админ-команды пропускаем только для реальных админов
+        if is_admin and isinstance(event, Update) and event.message and event.message.text:
+            cmd = event.message.text.split()[0].split("@")[0]
             if cmd in {"/stats", "/broadcast", "/ban", "/unban"}:
                 return await handler(event, data)
 

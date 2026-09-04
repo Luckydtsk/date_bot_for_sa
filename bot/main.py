@@ -7,6 +7,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bot.config import load_config
 from bot.db.session import init_db, make_engine, make_session_factory
 from bot.handlers import register_handlers
+from bot.handlers.errors import register_errors
 from bot.middlewares.db import BanMiddleware, DbSessionMiddleware
 
 
@@ -30,6 +31,7 @@ async def main() -> None:
     dp.update.middleware(BanMiddleware())
 
     register_handlers(dp)
+    register_errors(dp)
 
     logging.info("Бот запущен. Ctrl+C — остановить.")
     try:

@@ -25,8 +25,14 @@ def load_config() -> Config:
     if raw_admins:
         for part in raw_admins.split(","):
             part = part.strip()
-            if part:
+            if not part:
+                continue
+            try:
                 admin_ids.add(int(part))
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"ADMIN_IDS: «{part}» не число. Укажи telegram id через запятую."
+                ) from exc
 
     database_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ball_bot.db").strip()
     return Config(

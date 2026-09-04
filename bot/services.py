@@ -7,9 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import texts as t
 from bot.db.models import Profile
 from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo
-from bot.keyboards.common import match_kb
 from bot.keyboards.cleanup import remember_chat_keyboard
-
+from bot.keyboards.common import match_kb
 
 GENDER_MAP = {
     t.GENDER_MALE: "male",
@@ -20,6 +19,8 @@ DANCE_MAP = {
     t.DANCE_SOME: "some",
     t.DANCE_CONFIDENT: "confident",
 }
+
+TELEGRAM_CAPTION_LIMIT = 1024
 
 
 def opposite_gender(gender: str) -> str:
@@ -34,6 +35,22 @@ def contact_line(profile: Profile) -> str:
     return t.MATCH_CONTACT_ID.format(tg_id=profile.telegram_id)
 
 
+def _clip_caption(text: str) -> str:
+    if len(text) <= TELEGRAM_CAPTION_LIMIT:
+        return text
+    return text[: TELEGRAM_CAPTION_LIMIT - 1] + "…"
+
+
+def is_reactable_target(viewer: Profile, target: Profile | None) -> bool:
+    if target is None:
+        return False
+    if target.id == viewer.id:
+        return False
+    if not target.is_complete or target.is_banned:
+        return False
+    return True
+
+
 async def send_profile_card(
     target: Message | Bot,
     profile: Profile,
@@ -42,20 +59,32 @@ async def send_profile_card(
     reply_markup=None,
     prefix: str = "",
 ) -> Message | None:
-    caption = (prefix + t.format_card(profile)).strip()
-    if isinstance(target, Message):
-        return await target.answer_photo(
+    caption = _clip_caption((prefix + t.format_card(profile)).strip())
+    try:
+        if isinstance(target, Message):
+            return await target.answer_photo(
+                photo=profile.photo_file_id,
+                caption=caption,
+                reply_markup=reply_markup,
+            )
+        assert chat_id is not None
+        return await target.send_photo(
+            chat_id=chat_id,
             photo=profile.photo_file_id,
             caption=caption,
             reply_markup=reply_markup,
         )
-    assert chat_id is not None
-    return await target.send_photo(
-        chat_id=chat_id,
-        photo=profile.photo_file_id,
-        caption=caption,
-        reply_markup=reply_markup,
-    )
+    except Exception:
+        # Фото могло устареть — хотя бы текст
+        try:
+            if isinstance(target, Message):
+                return await target.answer(caption, reply_markup=reply_markup)
+            assert chat_id is not None
+            return await target.send_message(
+                chat_id=chat_id, text=caption, reply_markup=reply_markup
+            )
+        except Exception:
+            return None
 
 
 async def notify_match(
@@ -71,7 +100,9 @@ async def notify_match(
         return
 
     for me, other in ((a, b), (b, a)):
-        text = f"{t.MATCH_TITLE}\n\n{t.format_card(other)}\n\n{contact_line(other)}"
+        text = _clip_caption(
+            f"{t.MATCH_TITLE}\n\n{t.format_card(other)}\n\n{contact_line(other)}"
+        )
         sent = None
         try:
             sent = await bot.send_photo(
@@ -103,9 +134,15 @@ async def process_reaction(
 ) -> bool:
     """
     Сохраняет реакцию. Возвращает True, если случился новый матч.
+    Повторные клики и невалидные цели игнорируются.
     """
+    if not is_reactable_target(viewer, target):
+        return False
+
     like_repo = LikeRepo(session)
-    await like_repo.add(viewer.id, target.id, is_like=is_like)
+    result = await like_repo.add(viewer.id, target.id, is_like=is_like)
+    if result.status != "created":
+        return False
 
     if not is_like:
         return False

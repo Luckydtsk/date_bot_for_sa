@@ -134,8 +134,13 @@ async def refill_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
 
 
 @router.message(EditProfile.confirm_refill, F.text == t.YES)
-async def refill_yes(message: Message, state: FSMContext, bot: Bot) -> None:
+async def refill_yes(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
+    profile = await ProfileRepo(session).get_by_tg(message.from_user.id)
+    if profile:
+        await ProfileRepo(session).clear_reactions(profile)
     await state.clear()
     await message.answer(t.ASK_NAME, reply_markup=cancel_kb())
     await state.set_state(Registration.name)

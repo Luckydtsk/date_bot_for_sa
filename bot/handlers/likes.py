@@ -49,6 +49,9 @@ async def likes_me(
 
 @router.callback_query(F.data == "likes:menu")
 async def likes_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
     await clear_tracked_keyboards(
         bot, callback.message.chat.id, state, also=callback.message
     )
@@ -61,6 +64,10 @@ async def likes_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
 async def likes_action(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+
     parts = callback.data.split(":")
     if len(parts) < 2:
         await callback.answer()
@@ -69,7 +76,7 @@ async def likes_action(
     if action == "menu":
         return
 
-    if len(parts) != 3:
+    if len(parts) != 3 or action not in {"like", "skip"}:
         await callback.answer()
         return
 
@@ -83,21 +90,37 @@ async def likes_action(
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
 
-    target = await ProfileRepo(session).get_by_id(target_id)
+    repo = ProfileRepo(session)
+    # Только если человек реально в «входящих» и ответа ещё нет
+    if not await repo.has_pending_incoming_like(viewer.id, target_id):
+        await callback.answer("Уже обработано", show_alert=True)
+        incoming = await repo.incoming_likes(viewer)
+        if not incoming:
+            await callback.message.answer(t.LIKES_EMPTY, reply_markup=main_menu_kb())
+            return
+        profile, _ = incoming[0]
+        await state.update_data(likes_current_id=profile.id)
+        sent = await send_profile_card(
+            callback.message,
+            profile,
+            reply_markup=likes_kb(profile.id),
+            prefix=t.LIKES_HEADER + "\n\n",
+        )
+        await track_keyboard_message(state, sent)
+        return
+
+    target = await repo.get_by_id(target_id)
     if not target:
         await callback.answer("Анкета недоступна", show_alert=True)
     else:
         if action == "like":
             await process_reaction(bot, session, viewer, target, is_like=True)
             await callback.answer(t.LIKE_SENT)
-        elif action == "skip":
+        else:
             await process_reaction(bot, session, viewer, target, is_like=False)
             await callback.answer(t.DISLIKE_DONE)
-        else:
-            await callback.answer()
-            return
 
-    incoming = await ProfileRepo(session).incoming_likes(viewer)
+    incoming = await repo.incoming_likes(viewer)
     if not incoming:
         await state.update_data(likes_current_id=None)
         await callback.message.answer(t.LIKES_EMPTY, reply_markup=main_menu_kb())

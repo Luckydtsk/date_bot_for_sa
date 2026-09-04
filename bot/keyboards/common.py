@@ -70,12 +70,16 @@ def yes_no_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def feed_kb() -> InlineKeyboardMarkup:
+def feed_kb(profile_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text=t.BTN_LIKE, callback_data="feed:like"),
-                InlineKeyboardButton(text=t.BTN_DISLIKE, callback_data="feed:dislike"),
+                InlineKeyboardButton(
+                    text=t.BTN_LIKE, callback_data=f"feed:like:{profile_id}"
+                ),
+                InlineKeyboardButton(
+                    text=t.BTN_DISLIKE, callback_data=f"feed:dislike:{profile_id}"
+                ),
             ],
             [InlineKeyboardButton(text=t.BTN_SLEEP, callback_data="feed:sleep")],
         ]
