@@ -117,20 +117,12 @@ class ProfileRepo:
             profile.username = username
             await self.session.commit()
 
-    async def next_feed_candidate(
-        self,
-        viewer: Profile,
-        *,
-        exclude_ids: set[int] | None = None,
-    ) -> Profile | None:
-        """Следующая анкета: взаимный фильтр по полу, не своя, не оценённая, активная."""
-        rated_subq = select(Like.to_profile_id).where(Like.from_profile_id == viewer.id)
-
+    async def list_catalog(self, viewer: Profile) -> list[Profile]:
+        """Все подходящие анкеты для просмотра (можно листать сколько угодно)."""
         looking_back = or_(
             Profile.looking_for == "any",
             Profile.looking_for == viewer.gender,
         )
-
         stmt = (
             select(Profile)
             .where(
@@ -138,20 +130,31 @@ class ProfileRepo:
                 Profile.is_complete.is_(True),
                 Profile.is_active.is_(True),
                 Profile.is_banned.is_(False),
-                Profile.id.not_in(rated_subq),
                 looking_back,
             )
-            .order_by(func.random())
-            .limit(1)
+            .order_by(Profile.id.asc())
         )
         if viewer.looking_for != "any":
             stmt = stmt.where(Profile.gender == viewer.looking_for)
 
-        if exclude_ids:
-            stmt = stmt.where(Profile.id.notin_(exclude_ids))
-
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none()
+        return list(result.scalars().all())
+
+    async def next_feed_candidate(
+        self,
+        viewer: Profile,
+        *,
+        exclude_ids: set[int] | None = None,
+    ) -> Profile | None:
+        """Устарело для каталога; оставлено на случай совместимости."""
+        catalog = await self.list_catalog(viewer)
+        for profile in catalog:
+            if exclude_ids and profile.id in exclude_ids:
+                continue
+            existing = await LikeRepo(self.session).get(viewer.id, profile.id)
+            if existing is None:
+                return profile
+        return None
 
     async def incoming_likes(self, viewer: Profile) -> list[tuple[Profile, Like]]:
         """Кто лайкнул нас, а мы ещё не ответили (только активные анкеты)."""
