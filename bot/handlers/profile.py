@@ -51,6 +51,13 @@ async def _show_my_profile(message: Message, session: AsyncSession, state: FSMCo
         await message.answer(t.PROFILE_PAUSED)
 
 
+async def _back_to_edit_chooser(message: Message, state: FSMContext) -> None:
+    """Назад к списку полей «Что поменять?»."""
+    await state.set_state(EditProfile.choose_field)
+    sent = await message.answer(t.CHOOSE_FIELD, reply_markup=edit_fields_kb())
+    await track_keyboard_message(state, sent)
+
+
 @router.message(StateFilter(default_state), F.text == t.BTN_MY_PROFILE)
 async def my_profile(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
@@ -189,7 +196,6 @@ async def edit_field_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) 
         "dance": (EditProfile.dance, t.ASK_DANCE, dance_kb()),
         "about": (EditProfile.about, t.ASK_ABOUT, cancel_kb()),
         "photo": (EditProfile.photo, t.ASK_PHOTO, cancel_kb()),
-        "contact": (EditProfile.contact, t.ASK_CONTACT, skip_cancel_kb()),
     }
     if field not in mapping:
         await callback.answer()
@@ -212,8 +218,7 @@ async def _after_edit(
 @router.message(EditProfile.name, F.text)
 async def edit_name(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+        await _back_to_edit_chooser(message, state)
         return
     name = (message.text or "").strip()
     if not (1 <= len(name) <= 50):
@@ -230,8 +235,7 @@ async def edit_name(message: Message, state: FSMContext, session: AsyncSession, 
 @router.message(EditProfile.gender, F.text)
 async def edit_gender(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+        await _back_to_edit_chooser(message, state)
         return
     gender = GENDER_MAP.get(message.text or "")
     if not gender:
@@ -254,8 +258,7 @@ async def edit_edu_level(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+        await _back_to_edit_chooser(message, state)
         return
     if message.text == LEVEL_MASTER:
         await message.answer(t.MASTER_SOON, reply_markup=level_kb())
@@ -341,8 +344,7 @@ async def edit_edu_group(
 @router.message(EditProfile.height, F.text)
 async def edit_height(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+        await _back_to_edit_chooser(message, state)
         return
     height = None
     if message.text != t.SKIP:
@@ -362,8 +364,7 @@ async def edit_height(message: Message, state: FSMContext, session: AsyncSession
 @router.message(EditProfile.dance, F.text)
 async def edit_dance(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+        await _back_to_edit_chooser(message, state)
         return
     dance = DANCE_MAP.get(message.text or "")
     if not dance:
@@ -380,8 +381,7 @@ async def edit_dance(message: Message, state: FSMContext, session: AsyncSession,
 @router.message(EditProfile.about, F.text)
 async def edit_about(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
     if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+        await _back_to_edit_chooser(message, state)
         return
     about = (message.text or "").strip()
     if len(about) < 5:
@@ -411,28 +411,9 @@ async def edit_photo(message: Message, state: FSMContext, session: AsyncSession,
 @router.message(EditProfile.photo, F.text == t.CANCEL)
 async def edit_photo_cancel(message: Message, state: FSMContext, bot: Bot) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+    await _back_to_edit_chooser(message, state)
 
 
 @router.message(EditProfile.photo)
 async def edit_photo_invalid(message: Message) -> None:
     await message.answer(t.NEED_PHOTO, reply_markup=cancel_kb())
-
-
-@router.message(EditProfile.contact, F.text)
-async def edit_contact(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
-    if message.text == t.CANCEL:
-        await state.clear()
-        await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
-        return
-    contact = None if message.text == t.SKIP else (message.text or "").strip()
-    if contact and len(contact) > 200:
-        await message.answer("Слишком длинный контакт. До 200 символов.")
-        return
-    profile = await require_profile(session, message.from_user.id)
-    if not profile:
-        await message.answer(t.NO_PROFILE)
-        return
-    await ProfileRepo(session).update_fields(profile, contact=contact)
-    await _after_edit(message, state, session, bot)

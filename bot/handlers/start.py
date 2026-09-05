@@ -89,11 +89,6 @@ async def _ask_photo(message: Message, state: FSMContext) -> None:
     await state.set_state(Registration.photo)
 
 
-async def _ask_contact(message: Message, state: FSMContext) -> None:
-    await message.answer(t.ASK_CONTACT, reply_markup=skip_cancel_kb())
-    await state.set_state(Registration.contact)
-
-
 @router.message(CommandStart())
 async def cmd_start(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
@@ -110,7 +105,7 @@ async def cmd_start(
     if profile and profile.is_complete:
         await repo.sync_username(profile, message.from_user.username)
         await message.answer(t.WELCOME_BACK, reply_markup=main_menu_kb())
-        if not message.from_user.username and not profile.contact:
+        if not message.from_user.username:
             await message.answer(t.USERNAME_MISSING_WARN)
         return
 
@@ -264,35 +259,13 @@ async def reg_photo_cancel(message: Message, state: FSMContext) -> None:
 @router.message(Registration.photo, F.photo)
 async def reg_photo(message: Message, state: FSMContext, session: AsyncSession) -> None:
     photo = message.photo[-1]
-    await state.update_data(photo_file_id=photo.file_id)
-
-    if message.from_user.username:
-        await state.update_data(contact=None)
-        await _finish_registration(message, state, session)
-        return
-
-    await _ask_contact(message, state)
+    await state.update_data(photo_file_id=photo.file_id, contact=None)
+    await _finish_registration(message, state, session)
 
 
 @router.message(Registration.photo)
 async def reg_photo_invalid(message: Message) -> None:
     await message.answer(t.NEED_PHOTO, reply_markup=cancel_kb())
-
-
-@router.message(Registration.contact, F.text)
-async def reg_contact(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    if message.text == t.CANCEL:
-        await _ask_photo(message, state)
-        return
-    if message.text == t.SKIP:
-        await state.update_data(contact=None)
-    else:
-        contact = (message.text or "").strip()
-        if len(contact) > 200:
-            await message.answer("Слишком длинный контакт. До 200 символов.")
-            return
-        await state.update_data(contact=contact)
-    await _finish_registration(message, state, session)
 
 
 async def _finish_registration(
@@ -312,11 +285,11 @@ async def _finish_registration(
         goal=data.get("goal", DEFAULT_GOAL),
         about=data["about"],
         photo_file_id=data["photo_file_id"],
-        contact=data.get("contact"),
+        contact=None,
         is_active=True,
     )
     await state.clear()
     await message.answer(t.REG_DONE, reply_markup=main_menu_kb())
     await send_profile_card(message, profile, prefix=f"{t.MY_PROFILE_HEADER}\n\n")
-    if not message.from_user.username and not profile.contact:
+    if not message.from_user.username:
         await message.answer(t.USERNAME_MISSING_WARN)
