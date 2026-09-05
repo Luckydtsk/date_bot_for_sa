@@ -64,6 +64,14 @@ def admin_pick_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def admin_back_kb() -> ReplyKeyboardMarkup:
+    """Только «Назад» — возврат в админку (рассылка и т.п.)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=t.CANCEL)]],
+        resize_keyboard=True,
+    )
+
+
 def with_main_menu(
     base: ReplyKeyboardMarkup, *, is_admin: bool = False
 ) -> ReplyKeyboardMarkup:

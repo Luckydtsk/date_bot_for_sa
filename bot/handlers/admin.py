@@ -9,7 +9,7 @@ from bot.config import Config
 from bot.db.models import Profile
 from bot.db.repositories import ProfileRepo, StatsRepo
 from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
-from bot.keyboards.common import admin_menu_kb, admin_pick_kb, menu_for
+from bot.keyboards.common import admin_back_kb, admin_menu_kb, admin_pick_kb, menu_for
 from bot.services import send_profile_card
 from bot.states.profile import AdminBroadcast, AdminPickUser
 
@@ -132,15 +132,37 @@ async def _send_users_page(
     *,
     offset: int,
     action: str = "view",
+    config: Config | None = None,
 ) -> None:
     repo = ProfileRepo(session)
-    total = await repo.count_complete()
-    if total == 0:
-        await message.answer(t.USERS_EMPTY)
-        return
-    profiles = await repo.list_all(offset=offset, limit=_PAGE_SIZE)
+    admin_ids = config.admin_ids if config else frozenset()
+
+    if action == "unban":
+        total = await repo.count_banned()
+        if total == 0:
+            await message.answer(t.USERS_BANNED_EMPTY)
+            return
+        profiles = await repo.list_banned(offset=offset, limit=_PAGE_SIZE)
+        empty_text = t.USERS_BANNED_EMPTY
+    elif action == "ban":
+        total = await repo.count_bannable(exclude_tg_ids=admin_ids)
+        if total == 0:
+            await message.answer(t.USERS_BAN_EMPTY)
+            return
+        profiles = await repo.list_bannable(
+            exclude_tg_ids=admin_ids, offset=offset, limit=_PAGE_SIZE
+        )
+        empty_text = t.USERS_BAN_EMPTY
+    else:
+        total = await repo.count_complete()
+        if total == 0:
+            await message.answer(t.USERS_EMPTY)
+            return
+        profiles = await repo.list_all(offset=offset, limit=_PAGE_SIZE)
+        empty_text = t.USERS_EMPTY
+
     if not profiles:
-        await message.answer(t.USERS_EMPTY)
+        await message.answer(empty_text)
         return
     start = offset + 1
     end = offset + len(profiles)
@@ -170,8 +192,16 @@ async def _show_user_card(
 
 
 async def _apply_ban(
-    message: Message, session: AsyncSession, profile: Profile, *, banned: bool
+    message: Message,
+    session: AsyncSession,
+    profile: Profile,
+    config: Config,
+    *,
+    banned: bool,
 ) -> None:
+    if banned and profile.telegram_id in config.admin_ids:
+        await message.answer(t.BAN_ADMIN_FORBIDDEN)
+        return
     await ProfileRepo(session).set_banned(profile.telegram_id, banned)
     tmpl = t.BAN_DONE if banned else t.UNBAN_DONE
     await message.answer(tmpl.format(tg_id=profile.telegram_id))
@@ -220,7 +250,7 @@ async def cmd_admin_help(
     await message.answer(t.ADMIN_HELP)
 
 
-@router.message(F.text == t.BTN_ADMIN_BACK)
+@router.message(F.text.in_({t.BTN_ADMIN_BACK, "« В меню"}))
 async def btn_admin_back(
     message: Message, state: FSMContext, bot: Bot, config: Config
 ) -> None:
@@ -253,7 +283,7 @@ async def btn_admin_users(
     if not _is_admin(message.from_user.id, config):
         return
     await state.clear()
-    await _send_users_page(message, session, offset=0, action="view")
+    await _send_users_page(message, session, offset=0, action="view", config=config)
 
 
 @router.message(F.text == t.BTN_ADMIN_USER)
@@ -284,7 +314,7 @@ async def btn_admin_broadcast(
     if not _is_admin(message.from_user.id, config):
         return
     await state.set_state(AdminBroadcast.waiting_text)
-    await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
+    await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_back_kb())
 
 
 @router.message(AdminPickUser.waiting, F.text == t.BTN_ADMIN_PICK_LIST)
@@ -298,7 +328,9 @@ async def pick_open_list(
     action = data.get("admin_action", "view")
     if action not in _PICK_ACTIONS:
         action = "view"
-    await _send_users_page(message, session, offset=0, action=action)
+    await _send_users_page(
+        message, session, offset=0, action=action, config=config
+    )
 
 
 @router.message(AdminPickUser.waiting, F.text == t.CANCEL)
@@ -329,9 +361,9 @@ async def pick_text(
     await state.clear()
     await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
     if action == "ban":
-        await _apply_ban(message, session, profile, banned=True)
+        await _apply_ban(message, session, profile, config, banned=True)
     elif action == "unban":
-        await _apply_ban(message, session, profile, banned=False)
+        await _apply_ban(message, session, profile, config, banned=False)
     else:
         await _show_user_card(message, profile, state)
 
@@ -357,7 +389,11 @@ async def users_page(
         return
     await callback.message.delete()
     await _send_users_page(
-        callback.message, session, offset=int(offset_s), action=action
+        callback.message,
+        session,
+        offset=int(offset_s),
+        action=action,
+        config=config,
     )
     await callback.answer()
 
@@ -379,7 +415,11 @@ async def users_page_legacy(
         return
     await callback.message.delete()
     await _send_users_page(
-        callback.message, session, offset=int(offset_s), action="view"
+        callback.message,
+        session,
+        offset=int(offset_s),
+        action="view",
+        config=config,
     )
     await callback.answer()
 
@@ -413,9 +453,9 @@ async def pick_from_list(
     await state.clear()
     await callback.message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
     if action == "ban":
-        await _apply_ban(callback.message, session, profile, banned=True)
+        await _apply_ban(callback.message, session, profile, config, banned=True)
     elif action == "unban":
-        await _apply_ban(callback.message, session, profile, banned=False)
+        await _apply_ban(callback.message, session, profile, config, banned=False)
     else:
         await _show_user_card(callback.message, profile, state)
     await callback.answer()
@@ -437,7 +477,7 @@ async def cmd_users(message: Message, session: AsyncSession, config: Config) -> 
     if not _is_admin(message.from_user.id, config):
         await message.answer(t.ADMIN_ONLY)
         return
-    await _send_users_page(message, session, offset=0, action="view")
+    await _send_users_page(message, session, offset=0, action="view", config=config)
 
 
 @router.message(Command("user"))
@@ -477,31 +517,20 @@ async def cmd_broadcast(
     text = (command.args or "").strip()
     if not text:
         await state.set_state(AdminBroadcast.waiting_text)
-        await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
+        await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_back_kb())
         return
     await _send_broadcast(bot, session, text, message)
 
 
 @router.message(AdminBroadcast.waiting_text, F.text == t.CANCEL)
-@router.message(AdminBroadcast.waiting_text, F.text == t.BTN_ADMIN_BACK)
 async def broadcast_cancel(
-    message: Message, state: FSMContext, bot: Bot, config: Config
+    message: Message, state: FSMContext, config: Config
 ) -> None:
     if not _is_admin(message.from_user.id, config):
         await state.clear()
         return
-    if message.text == t.BTN_ADMIN_BACK:
-        await btn_admin_back(message, state, bot, config)
-        return
     await state.clear()
     await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
-
-
-@router.message(AdminBroadcast.waiting_text, F.text == t.BTN_ADMIN_PICK_LIST)
-async def broadcast_ignore_list(message: Message, config: Config) -> None:
-    if not _is_admin(message.from_user.id, config):
-        return
-    await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
 
 
 @router.message(AdminBroadcast.waiting_text, F.text)
@@ -515,9 +544,23 @@ async def broadcast_text(
     if not _is_admin(message.from_user.id, config):
         await state.clear()
         return
+    # Старая клавиатура могла ещё показывать лишние кнопки
+    if message.text in {
+        t.BTN_ADMIN_PICK_LIST,
+        t.BTN_ADMIN_BACK,
+        t.BTN_ADMIN_STATS,
+        t.BTN_ADMIN_USERS,
+        t.BTN_ADMIN_USER,
+        t.BTN_ADMIN_BROADCAST,
+        t.BTN_ADMIN_BAN,
+        t.BTN_ADMIN_UNBAN,
+        t.BTN_ADMIN,
+    }:
+        await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_back_kb())
+        return
     text = (message.text or "").strip()
     if not text:
-        await message.answer(t.BROADCAST_USAGE)
+        await message.answer(t.BROADCAST_USAGE, reply_markup=admin_back_kb())
         return
     await state.clear()
     await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
@@ -543,7 +586,7 @@ async def cmd_ban(
     if not profile:
         await message.answer(t.USER_NOT_FOUND)
         return
-    await _apply_ban(message, session, profile, banned=True)
+    await _apply_ban(message, session, profile, config, banned=True)
 
 
 @router.message(Command("unban"))
@@ -565,4 +608,4 @@ async def cmd_unban(
     if not profile:
         await message.answer(t.USER_NOT_FOUND)
         return
-    await _apply_ban(message, session, profile, banned=False)
+    await _apply_ban(message, session, profile, config, banned=False)

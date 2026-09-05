@@ -38,21 +38,12 @@ class BanMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         config: Config | None = data.get("config")
-        is_admin = bool(config and user.id in config.admin_ids)
-
-        # Админ-команды пропускаем только для реальных админов
-        if is_admin and isinstance(event, Update) and event.message and event.message.text:
-            cmd = event.message.text.split()[0].split("@")[0]
-            if cmd in {
-                "/stats",
-                "/broadcast",
-                "/ban",
-                "/unban",
-                "/users",
-                "/user",
-                "/admin",
-            }:
-                return await handler(event, data)
+        # Админы всегда проходят; если вдруг забанены — снимаем бан
+        if config and user.id in config.admin_ids:
+            profile = await ProfileRepo(session).get_by_tg(user.id)
+            if profile and profile.is_banned:
+                await ProfileRepo(session).set_banned(user.id, False)
+            return await handler(event, data)
 
         profile = await ProfileRepo(session).get_by_tg(user.id)
         if not (profile and profile.is_banned):

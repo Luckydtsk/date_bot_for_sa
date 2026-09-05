@@ -210,6 +210,64 @@ class ProfileRepo:
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_banned(self, *, offset: int = 0, limit: int = 10) -> list[Profile]:
+        stmt = (
+            select(Profile)
+            .where(Profile.is_complete.is_(True), Profile.is_banned.is_(True))
+            .order_by(Profile.id.asc())
+            .offset(offset)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_banned(self) -> int:
+        return (
+            await self.session.scalar(
+                select(func.count())
+                .select_from(Profile)
+                .where(Profile.is_complete.is_(True), Profile.is_banned.is_(True))
+            )
+            or 0
+        )
+
+    async def list_bannable(
+        self,
+        *,
+        exclude_tg_ids: frozenset[int] | set[int],
+        offset: int = 0,
+        limit: int = 10,
+    ) -> list[Profile]:
+        """Анкеты, которых можно банить (не админы)."""
+        stmt = (
+            select(Profile)
+            .where(
+                Profile.is_complete.is_(True),
+                Profile.is_banned.is_(False),
+            )
+            .order_by(Profile.id.asc())
+        )
+        if exclude_tg_ids:
+            stmt = stmt.where(Profile.telegram_id.not_in(exclude_tg_ids))
+        stmt = stmt.offset(offset).limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def count_bannable(
+        self, *, exclude_tg_ids: frozenset[int] | set[int]
+    ) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(Profile)
+            .where(
+                Profile.is_complete.is_(True),
+                Profile.is_banned.is_(False),
+            )
+        )
+        if exclude_tg_ids:
+            stmt = stmt.where(Profile.telegram_id.not_in(exclude_tg_ids))
+        return (await self.session.scalar(stmt)) or 0
+
     async def count_complete(self) -> int:
         return (
             await self.session.scalar(
