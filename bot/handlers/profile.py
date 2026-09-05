@@ -27,6 +27,7 @@ from bot.keyboards.common import (
     my_profile_kb,
     remove_kb,
     skip_cancel_kb,
+    with_main_menu,
     yes_no_kb,
 )
 from bot.services import DANCE_MAP, GENDER_MAP, opposite_gender, require_profile, send_profile_card
@@ -51,11 +52,16 @@ async def _show_my_profile(message: Message, session: AsyncSession, state: FSMCo
         await message.answer(t.PROFILE_PAUSED)
 
 
-async def _back_to_edit_chooser(message: Message, state: FSMContext) -> None:
-    """Назад к списку полей «Что поменять?»."""
+async def _show_edit_chooser(message: Message, state: FSMContext) -> None:
+    """Список полей + возврат нижнего меню (на случай клавиатуры поля)."""
     await state.set_state(EditProfile.choose_field)
-    sent = await message.answer(t.CHOOSE_FIELD, reply_markup=edit_fields_kb())
+    await message.answer(t.CHOOSE_FIELD, reply_markup=main_menu_kb())
+    sent = await message.answer("Выбери поле:", reply_markup=edit_fields_kb())
     await track_keyboard_message(state, sent)
+
+
+async def _back_to_edit_chooser(message: Message, state: FSMContext) -> None:
+    await _show_edit_chooser(message, state)
 
 
 @router.message(StateFilter(default_state), F.text == t.BTN_MY_PROFILE)
@@ -117,7 +123,9 @@ async def delete_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
         bot, callback.message.chat.id, state, also=callback.message
     )
     await state.set_state(EditProfile.confirm_delete)
-    await callback.message.answer(t.CONFIRM_DELETE, reply_markup=yes_no_kb())
+    await callback.message.answer(
+        t.CONFIRM_DELETE, reply_markup=with_main_menu(yes_no_kb())
+    )
     await callback.answer()
 
 
@@ -147,7 +155,9 @@ async def refill_ask(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
         bot, callback.message.chat.id, state, also=callback.message
     )
     await state.set_state(EditProfile.confirm_refill)
-    await callback.message.answer(t.CONFIRM_REFILL, reply_markup=yes_no_kb())
+    await callback.message.answer(
+        t.CONFIRM_REFILL, reply_markup=with_main_menu(yes_no_kb())
+    )
     await callback.answer()
 
 
@@ -176,10 +186,35 @@ async def edit_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> Non
     await clear_tracked_keyboards(
         bot, callback.message.chat.id, state, also=callback.message
     )
-    await state.set_state(EditProfile.choose_field)
-    sent = await callback.message.answer(t.CHOOSE_FIELD, reply_markup=edit_fields_kb())
-    await track_keyboard_message(state, sent)
+    await _show_edit_chooser(callback.message, state)
     await callback.answer()
+
+
+@router.message(StateFilter(EditProfile), F.text == t.BTN_BROWSE)
+async def edit_abort_browse(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    from bot.handlers.feed import start_browse
+
+    await start_browse(message, state, session, bot)
+
+
+@router.message(StateFilter(EditProfile), F.text == t.BTN_MY_PROFILE)
+async def edit_abort_my_profile(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    await clear_tracked_keyboards(bot, message.chat.id, state)
+    await state.clear()
+    await _show_my_profile(message, session, state)
+
+
+@router.message(StateFilter(EditProfile), F.text == t.BTN_LIKES_ME)
+async def edit_abort_likes_me(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    from bot.handlers.likes import start_likes_me
+
+    await start_likes_me(message, state, session, bot)
 
 
 @router.callback_query(EditProfile.choose_field, F.data.startswith("edit:"))
@@ -189,13 +224,13 @@ async def edit_field_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     )
     field = callback.data.split(":", 1)[1]
     mapping = {
-        "name": (EditProfile.name, t.ASK_NAME, remove_kb()),
-        "gender": (EditProfile.gender, t.ASK_GENDER, gender_kb()),
-        "faculty": (EditProfile.edu_level, t.ASK_EDU_LEVEL, level_kb()),
-        "height": (EditProfile.height, t.ASK_HEIGHT, skip_cancel_kb()),
-        "dance": (EditProfile.dance, t.ASK_DANCE, dance_kb()),
-        "about": (EditProfile.about, t.ASK_ABOUT, cancel_kb()),
-        "photo": (EditProfile.photo, t.ASK_PHOTO, cancel_kb()),
+        "name": (EditProfile.name, t.ASK_NAME, with_main_menu(cancel_kb())),
+        "gender": (EditProfile.gender, t.ASK_GENDER, with_main_menu(gender_kb())),
+        "faculty": (EditProfile.edu_level, t.ASK_EDU_LEVEL, with_main_menu(level_kb())),
+        "height": (EditProfile.height, t.ASK_HEIGHT, with_main_menu(skip_cancel_kb())),
+        "dance": (EditProfile.dance, t.ASK_DANCE, with_main_menu(dance_kb())),
+        "about": (EditProfile.about, t.ASK_ABOUT, with_main_menu(cancel_kb())),
+        "photo": (EditProfile.photo, t.ASK_PHOTO, with_main_menu(cancel_kb())),
     }
     if field not in mapping:
         await callback.answer()
@@ -239,7 +274,7 @@ async def edit_gender(message: Message, state: FSMContext, session: AsyncSession
         return
     gender = GENDER_MAP.get(message.text or "")
     if not gender:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=gender_kb())
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=with_main_menu(gender_kb()))
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
@@ -261,13 +296,15 @@ async def edit_edu_level(
         await _back_to_edit_chooser(message, state)
         return
     if message.text == LEVEL_MASTER:
-        await message.answer(t.MASTER_SOON, reply_markup=level_kb())
+        await message.answer(t.MASTER_SOON, reply_markup=with_main_menu(level_kb()))
         return
     if message.text != LEVEL_BACHELOR:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=level_kb())
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=with_main_menu(level_kb()))
         return
     await state.update_data(edu_level=LEVEL_BACHELOR)
-    await message.answer(t.ASK_EDU_PROGRAM, reply_markup=bachelor_programs_kb())
+    await message.answer(
+        t.ASK_EDU_PROGRAM, reply_markup=with_main_menu(bachelor_programs_kb())
+    )
     await state.set_state(EditProfile.edu_program)
 
 
@@ -276,15 +313,17 @@ async def edit_edu_program(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     if message.text == t.CANCEL:
-        await message.answer(t.ASK_EDU_LEVEL, reply_markup=level_kb())
+        await message.answer(t.ASK_EDU_LEVEL, reply_markup=with_main_menu(level_kb()))
         await state.set_state(EditProfile.edu_level)
         return
     program = (message.text or "").strip()
     if program not in BACHELOR_PROGRAMS:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=bachelor_programs_kb())
+        await message.answer(
+            t.FSM_USE_BUTTONS, reply_markup=with_main_menu(bachelor_programs_kb())
+        )
         return
     await state.update_data(edu_program=program)
-    await message.answer(t.ASK_EDU_COURSE, reply_markup=course_kb())
+    await message.answer(t.ASK_EDU_COURSE, reply_markup=with_main_menu(course_kb()))
     await state.set_state(EditProfile.edu_course)
 
 
@@ -293,19 +332,21 @@ async def edit_edu_course(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     if message.text == t.CANCEL:
-        await message.answer(t.ASK_EDU_PROGRAM, reply_markup=bachelor_programs_kb())
+        await message.answer(
+            t.ASK_EDU_PROGRAM, reply_markup=with_main_menu(bachelor_programs_kb())
+        )
         await state.set_state(EditProfile.edu_program)
         return
     raw = (message.text or "").strip()
     if raw not in {"1", "2", "3", "4"}:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=course_kb())
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=with_main_menu(course_kb()))
         return
     await state.update_data(edu_course=int(raw))
     data = await state.get_data()
     program = data["edu_program"]
     await message.answer(
         t.ASK_EDU_GROUP,
-        reply_markup=group_kb(program, int(raw)),
+        reply_markup=with_main_menu(group_kb(program, int(raw))),
     )
     await state.set_state(EditProfile.edu_group)
 
@@ -318,11 +359,11 @@ async def edit_edu_group(
     program = data.get("edu_program")
     course = data.get("edu_course")
     if message.text == t.CANCEL:
-        await message.answer(t.ASK_EDU_COURSE, reply_markup=course_kb())
+        await message.answer(t.ASK_EDU_COURSE, reply_markup=with_main_menu(course_kb()))
         await state.set_state(EditProfile.edu_course)
         return
     if not program or not course:
-        await message.answer(t.ASK_EDU_LEVEL, reply_markup=level_kb())
+        await message.answer(t.ASK_EDU_LEVEL, reply_markup=with_main_menu(level_kb()))
         await state.set_state(EditProfile.edu_level)
         return
     allowed = {format_group(program, int(course), s) for s in (1, 2, 3, 4)}
@@ -330,7 +371,7 @@ async def edit_edu_group(
     if group not in allowed:
         await message.answer(
             t.FSM_USE_BUTTONS,
-            reply_markup=group_kb(program, int(course)),
+            reply_markup=with_main_menu(group_kb(program, int(course))),
         )
         return
     profile = await require_profile(session, message.from_user.id)
@@ -350,7 +391,7 @@ async def edit_height(message: Message, state: FSMContext, session: AsyncSession
     if message.text != t.SKIP:
         raw = (message.text or "").strip().replace("см", "").strip()
         if not raw.isdigit() or not (100 <= int(raw) <= 250):
-            await message.answer(t.INVALID_HEIGHT, reply_markup=skip_cancel_kb())
+            await message.answer(t.INVALID_HEIGHT, reply_markup=with_main_menu(skip_cancel_kb()))
             return
         height = int(raw)
     profile = await require_profile(session, message.from_user.id)
@@ -368,7 +409,7 @@ async def edit_dance(message: Message, state: FSMContext, session: AsyncSession,
         return
     dance = DANCE_MAP.get(message.text or "")
     if not dance:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=dance_kb())
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=with_main_menu(dance_kb()))
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
@@ -416,4 +457,4 @@ async def edit_photo_cancel(message: Message, state: FSMContext, bot: Bot) -> No
 
 @router.message(EditProfile.photo)
 async def edit_photo_invalid(message: Message) -> None:
-    await message.answer(t.NEED_PHOTO, reply_markup=cancel_kb())
+    await message.answer(t.NEED_PHOTO, reply_markup=with_main_menu(cancel_kb()))

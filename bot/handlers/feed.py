@@ -64,11 +64,17 @@ async def _show_catalog_card(
 async def browse(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
+    await start_browse(message, state, session, bot)
+
+
+async def start_browse(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
     await state.clear()
     viewer = await require_profile(session, message.from_user.id)
     if not viewer:
-        await message.answer(t.NO_PROFILE)
+        await message.answer(t.NO_PROFILE, reply_markup=main_menu_kb())
         return
 
     if not viewer.is_active:
@@ -79,7 +85,7 @@ async def browse(
         await message.answer(t.FEED_EMPTY, reply_markup=main_menu_kb())
         return
 
-    await message.answer(t.FEED_COUNT.format(n=len(catalog)))
+    await message.answer(t.FEED_COUNT.format(n=len(catalog)), reply_markup=main_menu_kb())
     await state.update_data(feed_ids=[p.id for p in catalog], feed_index=0)
     await _show_catalog_card(message, state, session, viewer, index=0)
 

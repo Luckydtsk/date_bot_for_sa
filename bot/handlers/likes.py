@@ -42,6 +42,12 @@ async def _show_incoming(
 async def likes_me(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
+    await start_likes_me(message, state, session, bot)
+
+
+async def start_likes_me(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
     await state.clear()
     await _show_incoming(message, session, state)

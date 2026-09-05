@@ -23,6 +23,19 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def with_main_menu(base: ReplyKeyboardMarkup) -> ReplyKeyboardMarkup:
+    """Поля редактирования + нижнее меню, чтобы оно оставалось рабочим."""
+    rows = [list(row) for row in base.keyboard]
+    rows.append([KeyboardButton(text=t.BTN_BROWSE)])
+    rows.append(
+        [
+            KeyboardButton(text=t.BTN_MY_PROFILE),
+            KeyboardButton(text=t.BTN_LIKES_ME),
+        ]
+    )
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
 def gender_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
