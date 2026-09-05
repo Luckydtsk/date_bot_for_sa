@@ -54,11 +54,11 @@ def admin_menu_kb() -> ReplyKeyboardMarkup:
 
 
 def admin_pick_kb() -> ReplyKeyboardMarkup:
+    """Выбор пользователя: список + назад в админку."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=t.BTN_ADMIN_PICK_LIST)],
             [KeyboardButton(text=t.CANCEL)],
-            [KeyboardButton(text=t.BTN_ADMIN_BACK)],
         ],
         resize_keyboard=True,
     )
