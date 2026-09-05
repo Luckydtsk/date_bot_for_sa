@@ -137,12 +137,14 @@ def edit_fields_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=t.BTN_EDIT_NAME, callback_data="edit:name"),
                 InlineKeyboardButton(text=t.BTN_EDIT_PHOTO, callback_data="edit:photo"),
             ],
-            [InlineKeyboardButton(text=t.BTN_EDIT_GENDER, callback_data="edit:gender")],
             [
+                InlineKeyboardButton(text=t.BTN_EDIT_GENDER, callback_data="edit:gender"),
                 InlineKeyboardButton(text=t.BTN_EDIT_FACULTY, callback_data="edit:faculty"),
-                InlineKeyboardButton(text=t.BTN_EDIT_HEIGHT, callback_data="edit:height"),
             ],
-            [InlineKeyboardButton(text=t.BTN_EDIT_DANCE, callback_data="edit:dance")],
+            [
+                InlineKeyboardButton(text=t.BTN_EDIT_HEIGHT, callback_data="edit:height"),
+                InlineKeyboardButton(text=t.BTN_EDIT_DANCE, callback_data="edit:dance"),
+            ],
             [
                 InlineKeyboardButton(text=t.BTN_EDIT_ABOUT, callback_data="edit:about"),
                 InlineKeyboardButton(text=t.BTN_EDIT_CONTACT, callback_data="edit:contact"),
