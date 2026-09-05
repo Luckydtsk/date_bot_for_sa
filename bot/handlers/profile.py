@@ -15,6 +15,7 @@ from bot.keyboards.common import (
     gender_kb,
     main_menu_kb,
     my_profile_kb,
+    remove_kb,
     skip_cancel_kb,
     yes_no_kb,
 )
@@ -142,7 +143,7 @@ async def refill_yes(
     if profile:
         await ProfileRepo(session).clear_reactions(profile)
     await state.clear()
-    await message.answer(t.ASK_NAME, reply_markup=cancel_kb())
+    await message.answer(t.ASK_NAME, reply_markup=remove_kb())
     await state.set_state(Registration.name)
 
 
@@ -171,7 +172,7 @@ async def edit_field_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     )
     field = callback.data.split(":", 1)[1]
     mapping = {
-        "name": (EditProfile.name, t.ASK_NAME, cancel_kb()),
+        "name": (EditProfile.name, t.ASK_NAME, remove_kb()),
         "gender": (EditProfile.gender, t.ASK_GENDER, gender_kb()),
         "faculty": (EditProfile.faculty, t.ASK_FACULTY, cancel_kb()),
         "height": (EditProfile.height, t.ASK_HEIGHT, skip_cancel_kb()),
