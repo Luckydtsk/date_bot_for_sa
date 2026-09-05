@@ -7,6 +7,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts as t
 from bot.db.repositories import ProfileRepo
+from bot.education import (
+    BACHELOR_PROGRAMS,
+    LEVEL_BACHELOR,
+    LEVEL_MASTER,
+    bachelor_programs_kb,
+    course_kb,
+    format_group,
+    group_kb,
+    level_kb,
+)
 from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
 from bot.keyboards.common import (
     cancel_kb,
@@ -174,7 +184,7 @@ async def edit_field_pick(callback: CallbackQuery, state: FSMContext, bot: Bot) 
     mapping = {
         "name": (EditProfile.name, t.ASK_NAME, remove_kb()),
         "gender": (EditProfile.gender, t.ASK_GENDER, gender_kb()),
-        "faculty": (EditProfile.faculty, t.ASK_FACULTY, cancel_kb()),
+        "faculty": (EditProfile.edu_level, t.ASK_EDU_LEVEL, level_kb()),
         "height": (EditProfile.height, t.ASK_HEIGHT, skip_cancel_kb()),
         "dance": (EditProfile.dance, t.ASK_DANCE, dance_kb()),
         "about": (EditProfile.about, t.ASK_ABOUT, cancel_kb()),
@@ -239,21 +249,92 @@ async def edit_gender(message: Message, state: FSMContext, session: AsyncSession
     await _after_edit(message, state, session, bot)
 
 
-@router.message(EditProfile.faculty, F.text)
-async def edit_faculty(message: Message, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
+@router.message(EditProfile.edu_level, F.text)
+async def edit_edu_level(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
     if message.text == t.CANCEL:
         await state.clear()
         await message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
         return
-    faculty = (message.text or "").strip()
-    if not (2 <= len(faculty) <= 100):
-        await message.answer(t.FACULTY_TOO_LONG if len(faculty) > 100 else t.NEED_TEXT)
+    if message.text == LEVEL_MASTER:
+        await message.answer(t.MASTER_SOON, reply_markup=level_kb())
+        return
+    if message.text != LEVEL_BACHELOR:
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=level_kb())
+        return
+    await state.update_data(edu_level=LEVEL_BACHELOR)
+    await message.answer(t.ASK_EDU_PROGRAM, reply_markup=bachelor_programs_kb())
+    await state.set_state(EditProfile.edu_program)
+
+
+@router.message(EditProfile.edu_program, F.text)
+async def edit_edu_program(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    if message.text == t.CANCEL:
+        await message.answer(t.ASK_EDU_LEVEL, reply_markup=level_kb())
+        await state.set_state(EditProfile.edu_level)
+        return
+    program = (message.text or "").strip()
+    if program not in BACHELOR_PROGRAMS:
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=bachelor_programs_kb())
+        return
+    await state.update_data(edu_program=program)
+    await message.answer(t.ASK_EDU_COURSE, reply_markup=course_kb())
+    await state.set_state(EditProfile.edu_course)
+
+
+@router.message(EditProfile.edu_course, F.text)
+async def edit_edu_course(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    if message.text == t.CANCEL:
+        await message.answer(t.ASK_EDU_PROGRAM, reply_markup=bachelor_programs_kb())
+        await state.set_state(EditProfile.edu_program)
+        return
+    raw = (message.text or "").strip()
+    if raw not in {"1", "2", "3", "4"}:
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=course_kb())
+        return
+    await state.update_data(edu_course=int(raw))
+    data = await state.get_data()
+    program = data["edu_program"]
+    await message.answer(
+        t.ASK_EDU_GROUP,
+        reply_markup=group_kb(program, int(raw)),
+    )
+    await state.set_state(EditProfile.edu_group)
+
+
+@router.message(EditProfile.edu_group, F.text)
+async def edit_edu_group(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    data = await state.get_data()
+    program = data.get("edu_program")
+    course = data.get("edu_course")
+    if message.text == t.CANCEL:
+        await message.answer(t.ASK_EDU_COURSE, reply_markup=course_kb())
+        await state.set_state(EditProfile.edu_course)
+        return
+    if not program or not course:
+        await message.answer(t.ASK_EDU_LEVEL, reply_markup=level_kb())
+        await state.set_state(EditProfile.edu_level)
+        return
+    allowed = {format_group(program, int(course), s) for s in (1, 2, 3, 4)}
+    group = (message.text or "").strip()
+    if group not in allowed:
+        await message.answer(
+            t.FSM_USE_BUTTONS,
+            reply_markup=group_kb(program, int(course)),
+        )
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
         await message.answer(t.NO_PROFILE)
         return
-    await ProfileRepo(session).update_fields(profile, faculty=faculty)
+    await ProfileRepo(session).update_fields(profile, faculty=group)
     await _after_edit(message, state, session, bot)
 
 

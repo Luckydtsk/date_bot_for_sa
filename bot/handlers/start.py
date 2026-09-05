@@ -6,6 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts as t
 from bot.db.repositories import ProfileRepo
+from bot.education import (
+    BACHELOR_PROGRAMS,
+    LEVEL_BACHELOR,
+    LEVEL_MASTER,
+    bachelor_programs_kb,
+    course_kb,
+    format_group,
+    group_kb,
+    level_kb,
+)
 from bot.keyboards.cleanup import clear_tracked_keyboards
 from bot.keyboards.common import (
     cancel_kb,
@@ -33,9 +43,30 @@ async def _ask_gender(message: Message, state: FSMContext) -> None:
     await state.set_state(Registration.gender)
 
 
-async def _ask_faculty(message: Message, state: FSMContext) -> None:
-    await message.answer(t.ASK_FACULTY, reply_markup=cancel_kb())
-    await state.set_state(Registration.faculty)
+async def _ask_edu_level(message: Message, state: FSMContext) -> None:
+    await message.answer(t.ASK_EDU_LEVEL, reply_markup=level_kb())
+    await state.set_state(Registration.edu_level)
+
+
+async def _ask_edu_program(message: Message, state: FSMContext) -> None:
+    await message.answer(t.ASK_EDU_PROGRAM, reply_markup=bachelor_programs_kb())
+    await state.set_state(Registration.edu_program)
+
+
+async def _ask_edu_course(message: Message, state: FSMContext) -> None:
+    await message.answer(t.ASK_EDU_COURSE, reply_markup=course_kb())
+    await state.set_state(Registration.edu_course)
+
+
+async def _ask_edu_group(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    program = data["edu_program"]
+    course = int(data["edu_course"])
+    await message.answer(
+        t.ASK_EDU_GROUP,
+        reply_markup=group_kb(program, course),
+    )
+    await state.set_state(Registration.edu_group)
 
 
 async def _ask_height(message: Message, state: FSMContext) -> None:
@@ -89,7 +120,6 @@ async def cmd_start(
 
 @router.message(Registration.name, F.text)
 async def reg_name(message: Message, state: FSMContext) -> None:
-    # На шаге имени «Отмена» не предлагаем — если вдруг прислали, просто просим имя
     if message.text == t.CANCEL:
         await message.answer(t.ASK_NAME, reply_markup=remove_kb())
         return
@@ -114,29 +144,77 @@ async def reg_gender(message: Message, state: FSMContext) -> None:
         await message.answer(t.FSM_USE_BUTTONS, reply_markup=gender_kb())
         return
     await state.update_data(gender=gender, looking_for=opposite_gender(gender))
-    await _ask_faculty(message, state)
+    await _ask_edu_level(message, state)
 
 
-@router.message(Registration.faculty, F.text)
-async def reg_faculty(message: Message, state: FSMContext) -> None:
+@router.message(Registration.edu_level, F.text)
+async def reg_edu_level(message: Message, state: FSMContext) -> None:
     if message.text == t.CANCEL:
         await _ask_gender(message, state)
         return
-    faculty = (message.text or "").strip()
-    if len(faculty) < 2:
-        await message.answer(t.NEED_TEXT)
+    if message.text == LEVEL_MASTER:
+        await message.answer(t.MASTER_SOON, reply_markup=level_kb())
         return
-    if len(faculty) > 100:
-        await message.answer(t.FACULTY_TOO_LONG)
+    if message.text != LEVEL_BACHELOR:
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=level_kb())
         return
-    await state.update_data(faculty=faculty)
+    await state.update_data(edu_level=LEVEL_BACHELOR)
+    await _ask_edu_program(message, state)
+
+
+@router.message(Registration.edu_program, F.text)
+async def reg_edu_program(message: Message, state: FSMContext) -> None:
+    if message.text == t.CANCEL:
+        await _ask_edu_level(message, state)
+        return
+    program = (message.text or "").strip()
+    if program not in BACHELOR_PROGRAMS:
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=bachelor_programs_kb())
+        return
+    await state.update_data(edu_program=program)
+    await _ask_edu_course(message, state)
+
+
+@router.message(Registration.edu_course, F.text)
+async def reg_edu_course(message: Message, state: FSMContext) -> None:
+    if message.text == t.CANCEL:
+        await _ask_edu_program(message, state)
+        return
+    raw = (message.text or "").strip()
+    if raw not in {"1", "2", "3", "4"}:
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=course_kb())
+        return
+    await state.update_data(edu_course=int(raw))
+    await _ask_edu_group(message, state)
+
+
+@router.message(Registration.edu_group, F.text)
+async def reg_edu_group(message: Message, state: FSMContext) -> None:
+    if message.text == t.CANCEL:
+        await _ask_edu_course(message, state)
+        return
+    data = await state.get_data()
+    program = data.get("edu_program")
+    course = data.get("edu_course")
+    if not program or not course:
+        await _ask_edu_level(message, state)
+        return
+    allowed = {format_group(program, int(course), s) for s in (1, 2, 3, 4)}
+    group = (message.text or "").strip()
+    if group not in allowed:
+        await message.answer(
+            t.FSM_USE_BUTTONS,
+            reply_markup=group_kb(program, int(course)),
+        )
+        return
+    await state.update_data(faculty=group)
     await _ask_height(message, state)
 
 
 @router.message(Registration.height, F.text)
 async def reg_height(message: Message, state: FSMContext) -> None:
     if message.text == t.CANCEL:
-        await _ask_faculty(message, state)
+        await _ask_edu_group(message, state)
         return
     if message.text == t.SKIP:
         await state.update_data(height=None)
