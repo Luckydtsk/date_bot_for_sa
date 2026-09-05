@@ -9,7 +9,8 @@ from bot import texts as t
 from bot.db.models import Profile
 from bot.db.repositories import LikeRepo, ProfileRepo
 from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
-from bot.keyboards.common import feed_kb, main_menu_kb
+from bot.config import Config
+from bot.keyboards.common import feed_kb, menu_for
 from bot.services import process_reaction, require_profile, send_profile_card
 
 router = Router(name="feed")
@@ -20,13 +21,14 @@ async def _show_catalog_card(
     state: FSMContext,
     session: AsyncSession,
     viewer: Profile,
+    config: Config,
     *,
     index: int,
 ) -> None:
     data = await state.get_data()
     ids: list[int] = list(data.get("feed_ids") or [])
     if not ids:
-        await message.answer(t.FEED_EMPTY, reply_markup=main_menu_kb())
+        await message.answer(t.FEED_EMPTY, reply_markup=menu_for(message.from_user.id, config))
         return
 
     index = index % len(ids)
@@ -36,7 +38,7 @@ async def _show_catalog_card(
         catalog = await ProfileRepo(session).list_catalog(viewer)
         if not catalog:
             await state.clear()
-            await message.answer(t.FEED_EMPTY, reply_markup=main_menu_kb())
+            await message.answer(t.FEED_EMPTY, reply_markup=menu_for(message.from_user.id, config))
             return
         ids = [p.id for p in catalog]
         index = min(index, len(ids) - 1)
@@ -62,19 +64,19 @@ async def _show_catalog_card(
 
 @router.message(StateFilter(default_state), F.text == t.BTN_BROWSE)
 async def browse(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
-    await start_browse(message, state, session, bot)
+    await start_browse(message, state, session, bot, config)
 
 
 async def start_browse(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
     await state.clear()
     viewer = await require_profile(session, message.from_user.id)
     if not viewer:
-        await message.answer(t.NO_PROFILE, reply_markup=main_menu_kb())
+        await message.answer(t.NO_PROFILE, reply_markup=menu_for(message.from_user.id, config))
         return
 
     if not viewer.is_active:
@@ -82,12 +84,12 @@ async def start_browse(
 
     catalog = await ProfileRepo(session).list_catalog(viewer)
     if not catalog:
-        await message.answer(t.FEED_EMPTY, reply_markup=main_menu_kb())
+        await message.answer(t.FEED_EMPTY, reply_markup=menu_for(message.from_user.id, config))
         return
 
-    await message.answer(t.FEED_COUNT.format(n=len(catalog)), reply_markup=main_menu_kb())
+    await message.answer(t.FEED_COUNT.format(n=len(catalog)), reply_markup=menu_for(message.from_user.id, config))
     await state.update_data(feed_ids=[p.id for p in catalog], feed_index=0)
-    await _show_catalog_card(message, state, session, viewer, index=0)
+    await _show_catalog_card(message, state, session, viewer, config, index=0)
 
 
 async def _move(
@@ -95,6 +97,7 @@ async def _move(
     state: FSMContext,
     session: AsyncSession,
     bot: Bot,
+    config: Config,
     *,
     delta: int,
 ) -> None:
@@ -116,7 +119,7 @@ async def _move(
         # Обновим каталог на лету
         catalog = await ProfileRepo(session).list_catalog(viewer)
         if not catalog:
-            await callback.message.answer(t.FEED_EMPTY, reply_markup=main_menu_kb())
+            await callback.message.answer(t.FEED_EMPTY, reply_markup=menu_for(callback.from_user.id, config))
             await callback.answer()
             return
         ids = [p.id for p in catalog]
@@ -126,26 +129,26 @@ async def _move(
         index = int(data.get("feed_index", 0)) + delta
 
     await callback.answer()
-    await _show_catalog_card(callback.message, state, session, viewer, index=index)
+    await _show_catalog_card(callback.message, state, session, viewer, config, index=index)
 
 
 @router.callback_query(F.data.startswith("feed:prev:"))
 async def feed_prev(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
-    await _move(callback, state, session, bot, delta=-1)
+    await _move(callback, state, session, bot, config, delta=-1)
 
 
 @router.callback_query(F.data.startswith("feed:next:"))
 async def feed_next(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
-    await _move(callback, state, session, bot, delta=1)
+    await _move(callback, state, session, bot, config, delta=1)
 
 
 @router.callback_query(F.data.startswith("feed:like:"))
 async def feed_like(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
     if not callback.message:
         await callback.answer()
@@ -181,7 +184,7 @@ async def feed_like(
         bot, callback.message.chat.id, state, also=callback.message
     )
     index = int(data.get("feed_index", 0))
-    await _show_catalog_card(callback.message, state, session, viewer, index=index)
+    await _show_catalog_card(callback.message, state, session, viewer, config, index=index)
 
 
 @router.callback_query(F.data == "feed:noop")
@@ -200,7 +203,7 @@ async def feed_legacy(callback: CallbackQuery, state: FSMContext, bot: Bot) -> N
 
 
 @router.callback_query(F.data == "feed:sleep")
-async def feed_sleep(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def feed_sleep(callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config) -> None:
     if not callback.message:
         await callback.answer()
         return
@@ -208,5 +211,7 @@ async def feed_sleep(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
         bot, callback.message.chat.id, state, also=callback.message
     )
     await state.clear()
-    await callback.message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+    await callback.message.answer(
+        t.MENU_TITLE, reply_markup=menu_for(callback.from_user.id, config)
+    )
     await callback.answer()

@@ -8,14 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import texts as t
 from bot.db.repositories import ProfileRepo
 from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
-from bot.keyboards.common import likes_kb, main_menu_kb
+from bot.config import Config
+from bot.keyboards.common import likes_kb, menu_for
 from bot.services import process_reaction, require_profile, send_profile_card
 
 router = Router(name="likes")
 
 
 async def _show_incoming(
-    message: Message, session: AsyncSession, state: FSMContext
+    message: Message, session: AsyncSession, state: FSMContext, config: Config
 ) -> None:
     viewer = await require_profile(session, message.from_user.id)
     if not viewer:
@@ -24,7 +25,7 @@ async def _show_incoming(
 
     incoming = await ProfileRepo(session).incoming_likes(viewer)
     if not incoming:
-        await message.answer(t.LIKES_EMPTY, reply_markup=main_menu_kb())
+        await message.answer(t.LIKES_EMPTY, reply_markup=menu_for(message.from_user.id, config))
         return
 
     profile, _like = incoming[0]
@@ -40,21 +41,23 @@ async def _show_incoming(
 
 @router.message(StateFilter(default_state), F.text == t.BTN_LIKES_ME)
 async def likes_me(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
-    await start_likes_me(message, state, session, bot)
+    await start_likes_me(message, state, session, bot, config)
 
 
 async def start_likes_me(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
     await state.clear()
-    await _show_incoming(message, session, state)
+    await _show_incoming(message, session, state, config)
 
 
 @router.callback_query(F.data == "likes:menu")
-async def likes_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+async def likes_menu(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
+) -> None:
     if not callback.message:
         await callback.answer()
         return
@@ -62,13 +65,15 @@ async def likes_menu(callback: CallbackQuery, state: FSMContext, bot: Bot) -> No
         bot, callback.message.chat.id, state, also=callback.message
     )
     await state.clear()
-    await callback.message.answer(t.MENU_TITLE, reply_markup=main_menu_kb())
+    await callback.message.answer(
+        t.MENU_TITLE, reply_markup=menu_for(callback.from_user.id, config)
+    )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("likes:"))
 async def likes_action(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
     if not callback.message:
         await callback.answer()
@@ -102,7 +107,7 @@ async def likes_action(
         await callback.answer("Уже обработано", show_alert=True)
         incoming = await repo.incoming_likes(viewer)
         if not incoming:
-            await callback.message.answer(t.LIKES_EMPTY, reply_markup=main_menu_kb())
+            await callback.message.answer(t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config))
             return
         profile, _ = incoming[0]
         await state.update_data(likes_current_id=profile.id)
@@ -129,7 +134,7 @@ async def likes_action(
     incoming = await repo.incoming_likes(viewer)
     if not incoming:
         await state.update_data(likes_current_id=None)
-        await callback.message.answer(t.LIKES_EMPTY, reply_markup=main_menu_kb())
+        await callback.message.answer(t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config))
         return
 
     profile, _like = incoming[0]

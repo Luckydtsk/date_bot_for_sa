@@ -17,11 +17,12 @@ from bot.education import (
     level_kb,
 )
 from bot.keyboards.cleanup import clear_tracked_keyboards
+from bot.config import Config
 from bot.keyboards.common import (
     cancel_kb,
     dance_kb,
     gender_kb,
-    main_menu_kb,
+    menu_for,
     remove_kb,
     skip_cancel_kb,
 )
@@ -91,7 +92,7 @@ async def _ask_photo(message: Message, state: FSMContext) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
     await clear_tracked_keyboards(bot, message.chat.id, state)
     await state.clear()
@@ -104,7 +105,7 @@ async def cmd_start(
 
     if profile and profile.is_complete:
         await repo.sync_username(profile, message.from_user.username)
-        await message.answer(t.WELCOME_BACK, reply_markup=main_menu_kb())
+        await message.answer(t.WELCOME_BACK, reply_markup=menu_for(message.from_user.id, config))
         if not message.from_user.username:
             await message.answer(t.USERNAME_MISSING_WARN)
         return
@@ -257,10 +258,12 @@ async def reg_photo_cancel(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Registration.photo, F.photo)
-async def reg_photo(message: Message, state: FSMContext, session: AsyncSession) -> None:
+async def reg_photo(
+    message: Message, state: FSMContext, session: AsyncSession, config: Config
+) -> None:
     photo = message.photo[-1]
     await state.update_data(photo_file_id=photo.file_id, contact=None)
-    await _finish_registration(message, state, session)
+    await _finish_registration(message, state, session, config)
 
 
 @router.message(Registration.photo)
@@ -269,7 +272,7 @@ async def reg_photo_invalid(message: Message) -> None:
 
 
 async def _finish_registration(
-    message: Message, state: FSMContext, session: AsyncSession
+    message: Message, state: FSMContext, session: AsyncSession, config: Config
 ) -> None:
     data = await state.get_data()
     repo = ProfileRepo(session)
@@ -289,7 +292,7 @@ async def _finish_registration(
         is_active=True,
     )
     await state.clear()
-    await message.answer(t.REG_DONE, reply_markup=main_menu_kb())
+    await message.answer(t.REG_DONE, reply_markup=menu_for(message.from_user.id, config))
     await send_profile_card(message, profile, prefix=f"{t.MY_PROFILE_HEADER}\n\n")
     if not message.from_user.username:
         await message.answer(t.USERNAME_MISSING_WARN)

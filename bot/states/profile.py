@@ -34,3 +34,7 @@ class EditProfile(StatesGroup):
 
 class AdminBroadcast(StatesGroup):
     waiting_text = State()
+
+
+class AdminPickUser(StatesGroup):
+    waiting = State()  # data: admin_action = view|ban|unban

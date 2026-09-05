@@ -38,6 +38,15 @@ class ProfileRepo:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_username(self, username: str) -> Profile | None:
+        uname = username.lstrip("@").strip().lower()
+        if not uname:
+            return None
+        result = await self.session.execute(
+            select(Profile).where(func.lower(Profile.username) == uname)
+        )
+        return result.scalar_one_or_none()
+
     async def get_by_id(self, profile_id: int) -> Profile | None:
         result = await self.session.execute(select(Profile).where(Profile.id == profile_id))
         return result.scalar_one_or_none()

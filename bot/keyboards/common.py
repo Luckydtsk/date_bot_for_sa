@@ -7,23 +7,66 @@ from aiogram.types import (
 )
 
 from bot import texts as t
+from bot.config import Config
 
 
 def remove_kb() -> ReplyKeyboardRemove:
     return ReplyKeyboardRemove()
 
 
-def main_menu_kb() -> ReplyKeyboardMarkup:
+def is_admin(user_id: int | None, config: Config | None) -> bool:
+    return bool(config and user_id and user_id in config.admin_ids)
+
+
+def main_menu_kb(*, is_admin: bool = False) -> ReplyKeyboardMarkup:
+    rows: list[list[KeyboardButton]] = [
+        [KeyboardButton(text=t.BTN_BROWSE)],
+        [KeyboardButton(text=t.BTN_MY_PROFILE), KeyboardButton(text=t.BTN_LIKES_ME)],
+    ]
+    if is_admin:
+        rows.append([KeyboardButton(text=t.BTN_ADMIN)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def menu_for(user_id: int | None, config: Config | None) -> ReplyKeyboardMarkup:
+    return main_menu_kb(is_admin=is_admin(user_id, config))
+
+
+def admin_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t.BTN_BROWSE)],
-            [KeyboardButton(text=t.BTN_MY_PROFILE), KeyboardButton(text=t.BTN_LIKES_ME)],
+            [
+                KeyboardButton(text=t.BTN_ADMIN_STATS),
+                KeyboardButton(text=t.BTN_ADMIN_USERS),
+            ],
+            [
+                KeyboardButton(text=t.BTN_ADMIN_USER),
+                KeyboardButton(text=t.BTN_ADMIN_BROADCAST),
+            ],
+            [
+                KeyboardButton(text=t.BTN_ADMIN_BAN),
+                KeyboardButton(text=t.BTN_ADMIN_UNBAN),
+            ],
+            [KeyboardButton(text=t.BTN_ADMIN_BACK)],
         ],
         resize_keyboard=True,
     )
 
 
-def with_main_menu(base: ReplyKeyboardMarkup) -> ReplyKeyboardMarkup:
+def admin_pick_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=t.BTN_ADMIN_PICK_LIST)],
+            [KeyboardButton(text=t.CANCEL)],
+            [KeyboardButton(text=t.BTN_ADMIN_BACK)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def with_main_menu(
+    base: ReplyKeyboardMarkup, *, is_admin: bool = False
+) -> ReplyKeyboardMarkup:
     """Поля редактирования + нижнее меню, чтобы оно оставалось рабочим."""
     rows = [list(row) for row in base.keyboard]
     rows.append([KeyboardButton(text=t.BTN_BROWSE)])
@@ -33,6 +76,8 @@ def with_main_menu(base: ReplyKeyboardMarkup) -> ReplyKeyboardMarkup:
             KeyboardButton(text=t.BTN_LIKES_ME),
         ]
     )
+    if is_admin:
+        rows.append([KeyboardButton(text=t.BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 

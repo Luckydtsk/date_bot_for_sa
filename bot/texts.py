@@ -15,6 +15,7 @@ MENU_TITLE = "Главное меню"
 BTN_BROWSE = "👀 Смотреть анкеты"
 BTN_MY_PROFILE = "📝 Моя анкета"
 BTN_LIKES_ME = "💘 Кому я нравлюсь"
+BTN_ADMIN = "🛠 Админка"
 # --- Registration ---
 ASK_NAME = "Как тебя зовут? (или как обращаться)"
 ASK_GENDER = "Твой пол:"
@@ -146,6 +147,33 @@ USERNAME_MISSING_WARN = (
 
 # --- Admin ---
 ADMIN_ONLY = "Команда только для админов."
+ADMIN_PANEL_TITLE = "Админка. Выбери действие:"
+BTN_ADMIN_STATS = "📊 Статистика"
+BTN_ADMIN_USERS = "👥 Список анкет"
+BTN_ADMIN_USER = "🔍 Открыть анкету"
+BTN_ADMIN_BROADCAST = "📢 Рассылка"
+BTN_ADMIN_BAN = "🚫 Бан"
+BTN_ADMIN_UNBAN = "✅ Разбан"
+BTN_ADMIN_BACK = "« В меню"
+BTN_ADMIN_PICK_LIST = "📋 Выбрать из списка"
+ADMIN_PICK_PROMPT = (
+    "Пришли telegram id или @username.\n"
+    "Или нажми «Выбрать из списка» — там по страницам."
+)
+ADMIN_PICK_BAN = "Кого забанить?\n\n" + ADMIN_PICK_PROMPT
+ADMIN_PICK_UNBAN = "Кого разбанить?\n\n" + ADMIN_PICK_PROMPT
+ADMIN_PICK_VIEW = "Чью анкету открыть?\n\n" + ADMIN_PICK_PROMPT
+ADMIN_BROADCAST_ASK = "Пришли текст рассылки одним сообщением."
+ADMIN_HELP = (
+    "Админка:\n"
+    "Кнопка «Админка» внизу или команды:\n"
+    "/stats — цифры\n"
+    "/users — все анкеты\n"
+    "/user <id|@nick> — одна анкета\n"
+    "/broadcast текст — рассылка\n"
+    "/ban <id|@nick>\n"
+    "/unban <id|@nick>"
+)
 STATS_TEMPLATE = (
     "📊 Статистика\n\n"
     "Анкет: {profiles}\n"
@@ -157,14 +185,17 @@ STATS_TEMPLATE = (
 )
 BROADCAST_USAGE = "Использование: /broadcast текст сообщения"
 BROADCAST_DONE = "Рассылка завершена: {ok} ок, {fail} ошибок из {total}."
-BAN_USAGE = "Использование: /ban <telegram_id>"
-UNBAN_USAGE = "Использование: /unban <telegram_id>"
+BAN_USAGE = "Использование: /ban <telegram_id или @username>"
+UNBAN_USAGE = "Использование: /unban <telegram_id или @username>"
 BAN_DONE = "Пользователь {tg_id} забанен."
 UNBAN_DONE = "Пользователь {tg_id} разбанен."
 USER_NOT_FOUND = "Пользователь не найден в базе."
-USERS_USAGE = "Использование: /users — список анкет, /user <telegram_id> — одна анкета."
+USERS_USAGE = (
+    "Использование: /users — список, /user <telegram_id|@username> — анкета."
+)
 USERS_EMPTY = "Анкет пока нет."
 USERS_PAGE = "Анкеты {start}–{end} из {total}:"
+USERS_PICK_HINT = "Нажми на имя, чтобы выбрать."
 USER_LINE = (
     "{n}. {name} · {gender} · {faculty}\n"
     "   id {tg_id}{username}{flags}"

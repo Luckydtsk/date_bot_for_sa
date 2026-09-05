@@ -1,5 +1,5 @@
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,13 +8,15 @@ from bot import texts as t
 from bot.config import Config
 from bot.db.models import Profile
 from bot.db.repositories import ProfileRepo, StatsRepo
-from bot.keyboards.cleanup import track_keyboard_message
+from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
+from bot.keyboards.common import admin_menu_kb, admin_pick_kb, menu_for
 from bot.services import send_profile_card
-from bot.states.profile import AdminBroadcast
+from bot.states.profile import AdminBroadcast, AdminPickUser
 
 router = Router(name="admin")
 
 _PAGE_SIZE = 10
+_PICK_ACTIONS = frozenset({"view", "ban", "unban"})
 
 
 def _is_admin(user_id: int, config: Config) -> bool:
@@ -47,48 +49,70 @@ def _format_user_line(n: int, profile: Profile) -> str:
     )
 
 
-def _users_kb(offset: int, total: int) -> InlineKeyboardMarkup | None:
-    buttons: list[InlineKeyboardButton] = []
+def _button_label(profile: Profile) -> str:
+    flag = "🚫 " if profile.is_banned else ""
+    text = f"{flag}{profile.name} · {profile.telegram_id}"
+    return text[:64]
+
+
+def _users_kb(
+    profiles: list[Profile],
+    *,
+    offset: int,
+    total: int,
+    action: str,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=_button_label(p),
+                callback_data=f"admin:pick:{action}:{p.telegram_id}",
+            )
+        ]
+        for p in profiles
+    ]
+    nav: list[InlineKeyboardButton] = []
     if offset > 0:
-        buttons.append(
+        nav.append(
             InlineKeyboardButton(
                 text="← Назад",
-                callback_data=f"admin:users:{max(0, offset - _PAGE_SIZE)}",
+                callback_data=f"admin:list:{action}:{max(0, offset - _PAGE_SIZE)}",
             )
         )
     if offset + _PAGE_SIZE < total:
-        buttons.append(
+        nav.append(
             InlineKeyboardButton(
                 text="Далее →",
-                callback_data=f"admin:users:{offset + _PAGE_SIZE}",
+                callback_data=f"admin:list:{action}:{offset + _PAGE_SIZE}",
             )
         )
-    if not buttons:
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _resolve_profile(session: AsyncSession, raw: str) -> Profile | None:
+    raw = (raw or "").strip()
+    if not raw:
         return None
-    return InlineKeyboardMarkup(inline_keyboard=[buttons])
+    repo = ProfileRepo(session)
+    if raw.isdigit():
+        return await repo.get_by_tg(int(raw))
+    return await repo.get_by_username(raw)
 
 
-@router.message(Command("admin"))
-async def cmd_admin_help(message: Message, config: Config) -> None:
+async def open_admin_panel(
+    message: Message, state: FSMContext, bot: Bot, config: Config
+) -> None:
     if not _is_admin(message.from_user.id, config):
         await message.answer(t.ADMIN_ONLY)
         return
-    await message.answer(
-        "Админка:\n"
-        "/stats — цифры\n"
-        "/users — все анкеты\n"
-        "/user <telegram_id> — одна анкета с фото\n"
-        "/broadcast текст — рассылка\n"
-        "/ban <telegram_id>\n"
-        "/unban <telegram_id>"
-    )
+    await clear_tracked_keyboards(bot, message.chat.id, state)
+    await state.clear()
+    await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
 
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message, session: AsyncSession, config: Config) -> None:
-    if not _is_admin(message.from_user.id, config):
-        await message.answer(t.ADMIN_ONLY)
-        return
+async def _show_stats(message: Message, session: AsyncSession) -> None:
     stats = await StatsRepo(session).collect()
     await message.answer(
         t.STATS_TEMPLATE.format(
@@ -102,32 +126,12 @@ async def cmd_stats(message: Message, session: AsyncSession, config: Config) -> 
     )
 
 
-@router.message(Command("users"))
-async def cmd_users(message: Message, session: AsyncSession, config: Config) -> None:
-    if not _is_admin(message.from_user.id, config):
-        await message.answer(t.ADMIN_ONLY)
-        return
-    await _send_users_page(message, session, offset=0)
-
-
-@router.callback_query(F.data.startswith("admin:users:"))
-async def users_page(
-    callback: CallbackQuery, session: AsyncSession, config: Config
-) -> None:
-    if not _is_admin(callback.from_user.id, config):
-        await callback.answer(t.ADMIN_ONLY, show_alert=True)
-        return
-    if not callback.message:
-        await callback.answer()
-        return
-    offset = int(callback.data.split(":")[-1])
-    await callback.message.delete()
-    await _send_users_page(callback.message, session, offset=offset)
-    await callback.answer()
-
-
 async def _send_users_page(
-    message: Message, session: AsyncSession, *, offset: int
+    message: Message,
+    session: AsyncSession,
+    *,
+    offset: int,
+    action: str = "view",
 ) -> None:
     repo = ProfileRepo(session)
     total = await repo.count_complete()
@@ -142,16 +146,298 @@ async def _send_users_page(
     end = offset + len(profiles)
     lines = [
         t.USERS_PAGE.format(start=start, end=end, total=total),
+        t.USERS_PICK_HINT,
         "",
     ]
     for i, profile in enumerate(profiles, start=start):
         lines.append(_format_user_line(i, profile))
-    lines.append("")
-    lines.append("Карточка: /user <telegram_id>")
     await message.answer(
         "\n".join(lines),
-        reply_markup=_users_kb(offset, total),
+        reply_markup=_users_kb(profiles, offset=offset, total=total, action=action),
     )
+
+
+async def _show_user_card(
+    message: Message, profile: Profile, state: FSMContext
+) -> None:
+    uname = f"@{profile.username}" if profile.username else "нет username"
+    prefix = (
+        f"Админ-просмотр\n"
+        f"tg id: {profile.telegram_id} · {uname}{_flags(profile)}\n\n"
+    )
+    sent = await send_profile_card(message, profile, prefix=prefix)
+    await track_keyboard_message(state, sent)
+
+
+async def _apply_ban(
+    message: Message, session: AsyncSession, profile: Profile, *, banned: bool
+) -> None:
+    await ProfileRepo(session).set_banned(profile.telegram_id, banned)
+    tmpl = t.BAN_DONE if banned else t.UNBAN_DONE
+    await message.answer(tmpl.format(tg_id=profile.telegram_id))
+
+
+async def _start_pick(
+    message: Message, state: FSMContext, *, action: str, prompt: str
+) -> None:
+    await state.set_state(AdminPickUser.waiting)
+    await state.update_data(admin_action=action)
+    await message.answer(prompt, reply_markup=admin_pick_kb())
+
+
+async def _send_broadcast(
+    bot: Bot, session: AsyncSession, text: str, message: Message
+) -> None:
+    ids = await ProfileRepo(session).all_telegram_ids(only_active=True)
+    ok = fail = 0
+    for tg_id in ids:
+        try:
+            await bot.send_message(tg_id, text)
+            ok += 1
+        except Exception:
+            fail += 1
+    await message.answer(t.BROADCAST_DONE.format(ok=ok, fail=fail, total=len(ids)))
+
+
+# --- Panel entry ---
+
+
+@router.message(F.text == t.BTN_ADMIN)
+async def btn_admin(
+    message: Message, state: FSMContext, bot: Bot, config: Config
+) -> None:
+    await open_admin_panel(message, state, bot, config)
+
+
+@router.message(Command("admin"))
+async def cmd_admin_help(
+    message: Message, state: FSMContext, bot: Bot, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await message.answer(t.ADMIN_ONLY)
+        return
+    await open_admin_panel(message, state, bot, config)
+    await message.answer(t.ADMIN_HELP)
+
+
+@router.message(F.text == t.BTN_ADMIN_BACK)
+async def btn_admin_back(
+    message: Message, state: FSMContext, bot: Bot, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await clear_tracked_keyboards(bot, message.chat.id, state)
+    await state.clear()
+    await message.answer(
+        t.MENU_TITLE, reply_markup=menu_for(message.from_user.id, config)
+    )
+
+
+# --- Admin submenu buttons ---
+
+
+@router.message(F.text == t.BTN_ADMIN_STATS)
+async def btn_admin_stats(
+    message: Message, state: FSMContext, session: AsyncSession, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await state.clear()
+    await _show_stats(message, session)
+
+
+@router.message(F.text == t.BTN_ADMIN_USERS)
+async def btn_admin_users(
+    message: Message, state: FSMContext, session: AsyncSession, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await state.clear()
+    await _send_users_page(message, session, offset=0, action="view")
+
+
+@router.message(F.text == t.BTN_ADMIN_USER)
+async def btn_admin_user(message: Message, state: FSMContext, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await _start_pick(message, state, action="view", prompt=t.ADMIN_PICK_VIEW)
+
+
+@router.message(F.text == t.BTN_ADMIN_BAN)
+async def btn_admin_ban(message: Message, state: FSMContext, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await _start_pick(message, state, action="ban", prompt=t.ADMIN_PICK_BAN)
+
+
+@router.message(F.text == t.BTN_ADMIN_UNBAN)
+async def btn_admin_unban(message: Message, state: FSMContext, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await _start_pick(message, state, action="unban", prompt=t.ADMIN_PICK_UNBAN)
+
+
+@router.message(F.text == t.BTN_ADMIN_BROADCAST)
+async def btn_admin_broadcast(
+    message: Message, state: FSMContext, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await state.set_state(AdminBroadcast.waiting_text)
+    await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
+
+
+@router.message(AdminPickUser.waiting, F.text == t.BTN_ADMIN_PICK_LIST)
+async def pick_open_list(
+    message: Message, state: FSMContext, session: AsyncSession, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await state.clear()
+        return
+    data = await state.get_data()
+    action = data.get("admin_action", "view")
+    if action not in _PICK_ACTIONS:
+        action = "view"
+    await _send_users_page(message, session, offset=0, action=action)
+
+
+@router.message(AdminPickUser.waiting, F.text == t.CANCEL)
+async def pick_cancel(message: Message, state: FSMContext, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await state.clear()
+        return
+    await state.clear()
+    await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
+
+
+@router.message(AdminPickUser.waiting, F.text)
+async def pick_text(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    config: Config,
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await state.clear()
+        return
+    data = await state.get_data()
+    action = data.get("admin_action", "view")
+    profile = await _resolve_profile(session, message.text or "")
+    if not profile or not profile.is_complete:
+        await message.answer(t.USER_NOT_FOUND, reply_markup=admin_pick_kb())
+        return
+    await state.clear()
+    await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
+    if action == "ban":
+        await _apply_ban(message, session, profile, banned=True)
+    elif action == "unban":
+        await _apply_ban(message, session, profile, banned=False)
+    else:
+        await _show_user_card(message, profile, state)
+
+
+@router.callback_query(F.data.startswith("admin:list:"))
+async def users_page(
+    callback: CallbackQuery, session: AsyncSession, config: Config
+) -> None:
+    if not _is_admin(callback.from_user.id, config):
+        await callback.answer(t.ADMIN_ONLY, show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+    parts = callback.data.split(":")
+    # admin:list:{action}:{offset}
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    action, offset_s = parts[2], parts[3]
+    if action not in _PICK_ACTIONS or not offset_s.isdigit():
+        await callback.answer()
+        return
+    await callback.message.delete()
+    await _send_users_page(
+        callback.message, session, offset=int(offset_s), action=action
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:users:"))
+async def users_page_legacy(
+    callback: CallbackQuery, session: AsyncSession, config: Config
+) -> None:
+    """Старые кнопки пагинации /users."""
+    if not _is_admin(callback.from_user.id, config):
+        await callback.answer(t.ADMIN_ONLY, show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+    offset_s = callback.data.split(":")[-1]
+    if not offset_s.isdigit():
+        await callback.answer()
+        return
+    await callback.message.delete()
+    await _send_users_page(
+        callback.message, session, offset=int(offset_s), action="view"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:pick:"))
+async def pick_from_list(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    config: Config,
+) -> None:
+    if not _is_admin(callback.from_user.id, config):
+        await callback.answer(t.ADMIN_ONLY, show_alert=True)
+        return
+    if not callback.message:
+        await callback.answer()
+        return
+    parts = callback.data.split(":")
+    # admin:pick:{action}:{tg_id}
+    if len(parts) != 4:
+        await callback.answer()
+        return
+    action, tg_s = parts[2], parts[3]
+    if action not in _PICK_ACTIONS or not tg_s.isdigit():
+        await callback.answer()
+        return
+    profile = await ProfileRepo(session).get_by_tg(int(tg_s))
+    if not profile or not profile.is_complete:
+        await callback.answer(t.USER_NOT_FOUND, show_alert=True)
+        return
+    await state.clear()
+    await callback.message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
+    if action == "ban":
+        await _apply_ban(callback.message, session, profile, banned=True)
+    elif action == "unban":
+        await _apply_ban(callback.message, session, profile, banned=False)
+    else:
+        await _show_user_card(callback.message, profile, state)
+    await callback.answer()
+
+
+# --- Slash commands (совместимость) ---
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, session: AsyncSession, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await message.answer(t.ADMIN_ONLY)
+        return
+    await _show_stats(message, session)
+
+
+@router.message(Command("users"))
+async def cmd_users(message: Message, session: AsyncSession, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await message.answer(t.ADMIN_ONLY)
+        return
+    await _send_users_page(message, session, offset=0, action="view")
 
 
 @router.message(Command("user"))
@@ -166,20 +452,14 @@ async def cmd_user(
         await message.answer(t.ADMIN_ONLY)
         return
     raw = (command.args or "").strip()
-    if not raw.isdigit():
-        await message.answer(t.USERS_USAGE)
+    if not raw:
+        await _start_pick(message, state, action="view", prompt=t.ADMIN_PICK_VIEW)
         return
-    profile = await ProfileRepo(session).get_by_tg(int(raw))
+    profile = await _resolve_profile(session, raw)
     if not profile or not profile.is_complete:
         await message.answer(t.USER_NOT_FOUND)
         return
-    uname = f"@{profile.username}" if profile.username else "нет username"
-    prefix = (
-        f"Админ-просмотр\n"
-        f"tg id: {profile.telegram_id} · {uname}{_flags(profile)}\n\n"
-    )
-    sent = await send_profile_card(message, profile, prefix=prefix)
-    await track_keyboard_message(state, sent)
+    await _show_user_card(message, profile, state)
 
 
 @router.message(Command("broadcast"))
@@ -196,12 +476,32 @@ async def cmd_broadcast(
         return
     text = (command.args or "").strip()
     if not text:
-        await message.answer(
-            t.BROADCAST_USAGE + "\nИли пришли текст следующим сообщением."
-        )
         await state.set_state(AdminBroadcast.waiting_text)
+        await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
         return
     await _send_broadcast(bot, session, text, message)
+
+
+@router.message(AdminBroadcast.waiting_text, F.text == t.CANCEL)
+@router.message(AdminBroadcast.waiting_text, F.text == t.BTN_ADMIN_BACK)
+async def broadcast_cancel(
+    message: Message, state: FSMContext, bot: Bot, config: Config
+) -> None:
+    if not _is_admin(message.from_user.id, config):
+        await state.clear()
+        return
+    if message.text == t.BTN_ADMIN_BACK:
+        await btn_admin_back(message, state, bot, config)
+        return
+    await state.clear()
+    await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
+
+
+@router.message(AdminBroadcast.waiting_text, F.text == t.BTN_ADMIN_PICK_LIST)
+async def broadcast_ignore_list(message: Message, config: Config) -> None:
+    if not _is_admin(message.from_user.id, config):
+        return
+    await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
 
 
 @router.message(AdminBroadcast.waiting_text, F.text)
@@ -220,56 +520,49 @@ async def broadcast_text(
         await message.answer(t.BROADCAST_USAGE)
         return
     await state.clear()
+    await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
     await _send_broadcast(bot, session, text, message)
-
-
-async def _send_broadcast(
-    bot: Bot, session: AsyncSession, text: str, message: Message
-) -> None:
-    ids = await ProfileRepo(session).all_telegram_ids(only_active=True)
-    ok = fail = 0
-    for tg_id in ids:
-        try:
-            await bot.send_message(tg_id, text)
-            ok += 1
-        except Exception:
-            fail += 1
-    await message.answer(t.BROADCAST_DONE.format(ok=ok, fail=fail, total=len(ids)))
 
 
 @router.message(Command("ban"))
 async def cmd_ban(
-    message: Message, command: CommandObject, session: AsyncSession, config: Config
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    config: Config,
+    state: FSMContext,
 ) -> None:
     if not _is_admin(message.from_user.id, config):
         await message.answer(t.ADMIN_ONLY)
         return
     raw = (command.args or "").strip()
-    if not raw.isdigit():
-        await message.answer(t.BAN_USAGE)
+    if not raw:
+        await _start_pick(message, state, action="ban", prompt=t.ADMIN_PICK_BAN)
         return
-    tg_id = int(raw)
-    profile = await ProfileRepo(session).set_banned(tg_id, True)
+    profile = await _resolve_profile(session, raw)
     if not profile:
         await message.answer(t.USER_NOT_FOUND)
         return
-    await message.answer(t.BAN_DONE.format(tg_id=tg_id))
+    await _apply_ban(message, session, profile, banned=True)
 
 
 @router.message(Command("unban"))
 async def cmd_unban(
-    message: Message, command: CommandObject, session: AsyncSession, config: Config
+    message: Message,
+    command: CommandObject,
+    session: AsyncSession,
+    config: Config,
+    state: FSMContext,
 ) -> None:
     if not _is_admin(message.from_user.id, config):
         await message.answer(t.ADMIN_ONLY)
         return
     raw = (command.args or "").strip()
-    if not raw.isdigit():
-        await message.answer(t.UNBAN_USAGE)
+    if not raw:
+        await _start_pick(message, state, action="unban", prompt=t.ADMIN_PICK_UNBAN)
         return
-    tg_id = int(raw)
-    profile = await ProfileRepo(session).set_banned(tg_id, False)
+    profile = await _resolve_profile(session, raw)
     if not profile:
         await message.answer(t.USER_NOT_FOUND)
         return
-    await message.answer(t.UNBAN_DONE.format(tg_id=tg_id))
+    await _apply_ban(message, session, profile, banned=False)
