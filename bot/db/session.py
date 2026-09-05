@@ -6,12 +6,25 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bot.db.models import Base
 
 
-def make_engine(database_url: str) -> AsyncEngine:
-    engine = create_async_engine(database_url, echo=False)
+def _is_sqlite(url: str) -> bool:
+    return url.startswith("sqlite")
 
-    @event.listens_for(engine.sync_engine, "connect")
-    def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
-        if database_url.startswith("sqlite"):
+
+def make_engine(database_url: str) -> AsyncEngine:
+    kwargs: dict = {"echo": False}
+    if _is_sqlite(database_url):
+        # Для локальной разработки
+        pass
+    else:
+        # Postgres на Railway / проде
+        kwargs["pool_pre_ping"] = True
+
+    engine = create_async_engine(database_url, **kwargs)
+
+    if _is_sqlite(database_url):
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
@@ -26,7 +39,7 @@ def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
 async def init_db(engine: AsyncEngine) -> None:
     """Создаёт таблицы, если их ещё нет (схема описана в models.py)."""
     async with engine.begin() as conn:
-        if str(engine.url).startswith("sqlite"):
+        if _is_sqlite(str(engine.url)):
             await conn.execute(text("PRAGMA foreign_keys=ON"))
         await conn.run_sync(Base.metadata.create_all)
 

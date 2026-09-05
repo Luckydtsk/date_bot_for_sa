@@ -15,6 +15,16 @@ class Config:
     database_url: str
 
 
+def normalize_database_url(url: str) -> str:
+    """Railway отдаёт postgresql:// — для SQLAlchemy async нужен asyncpg."""
+    url = url.strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    if url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+    return url
+
+
 def load_config() -> Config:
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token:
@@ -34,7 +44,9 @@ def load_config() -> Config:
                     f"ADMIN_IDS: «{part}» не число. Укажи telegram id через запятую."
                 ) from exc
 
-    database_url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ball_bot.db").strip()
+    database_url = normalize_database_url(
+        os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ball_bot.db")
+    )
     return Config(
         bot_token=token,
         admin_ids=frozenset(admin_ids),
