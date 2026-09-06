@@ -89,6 +89,9 @@ async def my_profile(
 async def back_menu(
     callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
 ) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
     await clear_tracked_keyboards(
         bot, callback.message.chat.id, state, also=callback.message
     )
@@ -206,7 +209,8 @@ async def refill_yes(
     await clear_tracked_keyboards(bot, message.chat.id, state)
     profile = await ProfileRepo(session).get_by_tg(message.from_user.id)
     if profile:
-        await ProfileRepo(session).clear_reactions(profile)
+        # Скрываем из каталога; лайки/матчи сбросим только после успешного финиша
+        await ProfileRepo(session).begin_refill(profile)
     await state.clear()
     await message.answer(t.ASK_NAME, reply_markup=remove_kb())
     await state.set_state(Registration.name)
@@ -625,3 +629,8 @@ async def edit_photo_invalid(message: Message, config: Config) -> None:
         t.NEED_PHOTO,
         reply_markup=_edit_kb(cancel_kb(), message.from_user.id, config),
     )
+
+
+@router.message(StateFilter(EditProfile))
+async def edit_unexpected(message: Message) -> None:
+    await message.answer(t.FSM_NEED_TEXT)

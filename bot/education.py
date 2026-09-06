@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
 
 from bot import texts as t
@@ -11,13 +13,19 @@ LEVEL_MASTER = "Магистратура"
 
 BACHELOR_PROGRAMS = ("И", "ИЯ", "МБ", "МКИ", "МПБЭ", "РИС", "Ю")
 
-# Курс → год поступления (короткий)
-COURSE_TO_YEAR = {1: 26, 2: 25, 3: 24, 4: 23}
 SUBGROUPS = (1, 2, 3, 4)
 
 
+def intake_year_short(course: int, *, today: date | None = None) -> int:
+    """Короткий год поступления для курса (1→текущий набор, 2→прошлый, …)."""
+    today = today or date.today()
+    # Учебный год стартует в августе
+    start_year = today.year if today.month >= 8 else today.year - 1
+    return (start_year % 100) - (course - 1)
+
+
 def format_group(program: str, course: int, subgroup: int) -> str:
-    year = COURSE_TO_YEAR[course]
+    year = intake_year_short(course)
     return f"{program}-{year}-{subgroup}"
 
 

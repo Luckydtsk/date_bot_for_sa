@@ -91,10 +91,6 @@ async def likes_action(
         await callback.answer()
         return
 
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-
     target_id = int(parts[2])
     viewer = await require_profile(session, callback.from_user.id)
     if not viewer:
@@ -105,9 +101,14 @@ async def likes_action(
     # Только если человек реально в «входящих» и ответа ещё нет
     if not await repo.has_pending_incoming_like(viewer.id, target_id):
         await callback.answer("Уже обработано", show_alert=True)
+        await clear_tracked_keyboards(
+            bot, callback.message.chat.id, state, also=callback.message
+        )
         incoming = await repo.incoming_likes(viewer)
         if not incoming:
-            await callback.message.answer(t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config))
+            await callback.message.answer(
+                t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config)
+            )
             return
         profile, _ = incoming[0]
         await state.update_data(likes_current_id=profile.id)
@@ -123,18 +124,30 @@ async def likes_action(
     target = await repo.get_by_id(target_id)
     if not target:
         await callback.answer("Анкета недоступна", show_alert=True)
-    else:
-        if action == "like":
-            await process_reaction(bot, session, viewer, target, is_like=True)
-            await callback.answer(t.LIKE_SENT)
+        return
+
+    await clear_tracked_keyboards(
+        bot, callback.message.chat.id, state, also=callback.message
+    )
+
+    if action == "like":
+        outcome = await process_reaction(bot, session, viewer, target, is_like=True)
+        if outcome.status == "rejected":
+            await callback.answer(t.LIKE_REJECTED, show_alert=True)
+        elif outcome.status == "exists":
+            await callback.answer(t.LIKE_ALREADY, show_alert=True)
         else:
-            await process_reaction(bot, session, viewer, target, is_like=False)
-            await callback.answer(t.DISLIKE_DONE)
+            await callback.answer(t.LIKE_SENT)
+    else:
+        await process_reaction(bot, session, viewer, target, is_like=False)
+        await callback.answer(t.DISLIKE_DONE)
 
     incoming = await repo.incoming_likes(viewer)
     if not incoming:
         await state.update_data(likes_current_id=None)
-        await callback.message.answer(t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config))
+        await callback.message.answer(
+            t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config)
+        )
         return
 
     profile, _like = incoming[0]

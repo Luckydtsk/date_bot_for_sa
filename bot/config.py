@@ -13,6 +13,7 @@ class Config:
     bot_token: str
     admin_ids: frozenset[int]
     database_url: str
+    redis_url: str | None
 
 
 def normalize_database_url(url: str) -> str:
@@ -47,8 +48,10 @@ def load_config() -> Config:
     database_url = normalize_database_url(
         os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ball_bot.db")
     )
+    redis_url = os.getenv("REDIS_URL", "").strip() or None
     return Config(
         bot_token=token,
         admin_ids=frozenset(admin_ids),
         database_url=database_url,
+        redis_url=redis_url,
     )

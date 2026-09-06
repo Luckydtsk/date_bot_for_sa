@@ -1,5 +1,5 @@
 from aiogram import Bot, F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,12 +105,18 @@ async def cmd_start(
 
     if profile and profile.is_complete:
         await repo.sync_username(profile, message.from_user.username)
-        await message.answer(t.WELCOME_BACK, reply_markup=menu_for(message.from_user.id, config))
+        await message.answer(
+            t.WELCOME_BACK, reply_markup=menu_for(message.from_user.id, config)
+        )
         if not message.from_user.username:
             await message.answer(t.USERNAME_MISSING_WARN)
         return
 
-    await message.answer(t.WELCOME_NEW, reply_markup=remove_kb())
+    # Нет анкеты или refill (is_complete=False)
+    if profile and not profile.is_complete:
+        await message.answer(t.REG_CONTINUE, reply_markup=remove_kb())
+    else:
+        await message.answer(t.WELCOME_NEW, reply_markup=remove_kb())
     await _ask_name(message, state)
 
 
@@ -269,6 +275,11 @@ async def reg_photo(
 @router.message(Registration.photo)
 async def reg_photo_invalid(message: Message) -> None:
     await message.answer(t.NEED_PHOTO, reply_markup=cancel_kb())
+
+
+@router.message(StateFilter(Registration))
+async def reg_unexpected(message: Message) -> None:
+    await message.answer(t.FSM_NEED_TEXT)
 
 
 async def _finish_registration(

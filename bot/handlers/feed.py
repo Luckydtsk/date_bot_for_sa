@@ -176,7 +176,13 @@ async def feed_like(
         await callback.answer(t.LIKE_ALREADY, show_alert=True)
         return
 
-    await process_reaction(bot, session, viewer, target, is_like=True)
+    outcome = await process_reaction(bot, session, viewer, target, is_like=True)
+    if outcome.status == "rejected":
+        await callback.answer(t.LIKE_REJECTED, show_alert=True)
+        return
+    if outcome.status == "exists":
+        await callback.answer(t.LIKE_ALREADY, show_alert=True)
+        return
     await callback.answer(t.LIKE_SENT)
 
     # Остаёмся на той же анкете, обновляем пометку «уже лайкнул»

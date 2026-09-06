@@ -19,8 +19,6 @@ async def on_error(event: ErrorEvent, bot: Bot) -> None:
                 )
             except Exception:
                 pass
-            if update.callback_query.message:
-                await update.callback_query.message.answer(t.UNKNOWN)
         elif update.message:
             await update.message.answer(t.UNKNOWN)
     except Exception:

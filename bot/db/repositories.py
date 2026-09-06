@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Like, Match, Profile
 
-ReactionResult = Literal["created", "exists", "rejected"]
+ReactionResult = Literal["created", "updated", "exists", "rejected"]
 
 
 @dataclass
@@ -25,7 +25,15 @@ class Stats:
 @dataclass
 class AddLikeResult:
     like: Like | None
-    status: ReactionResult  # created = новая запись; exists = уже была; rejected = отказ
+    status: ReactionResult  # created/updated/exists/rejected
+
+
+@dataclass
+class ReactionOutcome:
+    """Результат process_reaction для честного UX."""
+
+    status: ReactionResult
+    matched: bool = False
 
 
 class ProfileRepo:
@@ -54,13 +62,30 @@ class ProfileRepo:
     async def create(self, **fields: Any) -> Profile:
         profile = Profile(**fields)
         self.session.add(profile)
-        await self.session.commit()
-        await self.session.refresh(profile)
-        return profile
+        try:
+            await self.session.commit()
+            await self.session.refresh(profile)
+            return profile
+        except IntegrityError:
+            await self.session.rollback()
+            existing = await self.get_by_tg(int(fields["telegram_id"]))
+            if existing is None:
+                raise
+            for key, value in fields.items():
+                if key == "telegram_id":
+                    continue
+                setattr(existing, key, value)
+            existing.is_complete = True
+            await self.session.commit()
+            await self.session.refresh(existing)
+            return existing
 
     async def upsert_complete(self, telegram_id: int, **fields: Any) -> Profile:
         existing = await self.get_by_tg(telegram_id)
         if existing:
+            # Refill / незавершённая анкета: сбрасываем старый граф только при финише
+            if not existing.is_complete:
+                await self._delete_reactions(existing.id)
             for key, value in fields.items():
                 setattr(existing, key, value)
             existing.is_complete = True
@@ -68,6 +93,14 @@ class ProfileRepo:
             await self.session.refresh(existing)
             return existing
         return await self.create(telegram_id=telegram_id, is_complete=True, **fields)
+
+    async def begin_refill(self, profile: Profile) -> Profile:
+        """Скрываем анкету из каталога; лайки трогаем только после успешного финиша."""
+        profile.is_complete = False
+        profile.is_active = False
+        await self.session.commit()
+        await self.session.refresh(profile)
+        return profile
 
     async def update_fields(self, profile: Profile, **fields: Any) -> Profile:
         for key, value in fields.items():
@@ -84,32 +117,28 @@ class ProfileRepo:
 
     async def delete(self, profile: Profile) -> None:
         pid = profile.id
-        await self.session.execute(
-            delete(Match).where(
-                or_(Match.profile1_id == pid, Match.profile2_id == pid)
-            )
-        )
-        await self.session.execute(
-            delete(Like).where(
-                or_(Like.from_profile_id == pid, Like.to_profile_id == pid)
-            )
-        )
+        await self._delete_reactions(pid)
         await self.session.delete(profile)
         await self.session.commit()
 
-    async def clear_reactions(self, profile: Profile) -> None:
-        """Сброс лайков/матчей при заполнении анкеты заново."""
-        pid = profile.id
+    async def _delete_reactions(self, profile_id: int) -> None:
         await self.session.execute(
             delete(Match).where(
-                or_(Match.profile1_id == pid, Match.profile2_id == pid)
+                or_(Match.profile1_id == profile_id, Match.profile2_id == profile_id)
             )
         )
         await self.session.execute(
             delete(Like).where(
-                or_(Like.from_profile_id == pid, Like.to_profile_id == pid)
+                or_(
+                    Like.from_profile_id == profile_id,
+                    Like.to_profile_id == profile_id,
+                )
             )
         )
+
+    async def clear_reactions(self, profile: Profile) -> None:
+        """Сброс лайков/матчей (legacy; refill теперь чистит в upsert_complete)."""
+        await self._delete_reactions(profile.id)
         await self.session.commit()
 
     async def set_banned(self, telegram_id: int, banned: bool) -> Profile | None:
@@ -192,10 +221,14 @@ class ProfileRepo:
         like = await LikeRepo(self.session).get(from_id, viewer_id)
         return bool(like and like.is_like)
 
-    async def all_telegram_ids(self, *, only_active: bool = True) -> list[int]:
+    async def all_telegram_ids(
+        self, *, only_complete: bool = True, only_active: bool = True
+    ) -> list[int]:
         stmt = select(Profile.telegram_id).where(Profile.is_banned.is_(False))
-        if only_active:
+        if only_complete:
             stmt = stmt.where(Profile.is_complete.is_(True))
+        if only_active:
+            stmt = stmt.where(Profile.is_active.is_(True))
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
@@ -299,15 +332,19 @@ class LikeRepo:
         *,
         is_like: bool,
     ) -> AddLikeResult:
-        """
-        Идемпотентная реакция: повторный клик не переписывает лайк в дизлайк.
-        """
+        """Идемпотентно; dislike→like (и наоборот) обновляет запись."""
         if from_id == to_id:
             return AddLikeResult(like=None, status="rejected")
 
         existing = await self.get(from_id, to_id)
         if existing is not None:
-            return AddLikeResult(like=existing, status="exists")
+            if existing.is_like == is_like:
+                return AddLikeResult(like=existing, status="exists")
+            existing.is_like = is_like
+            existing.is_superlike = False
+            await self.session.commit()
+            await self.session.refresh(existing)
+            return AddLikeResult(like=existing, status="updated")
 
         like = Like(
             from_profile_id=from_id,
@@ -323,7 +360,14 @@ class LikeRepo:
         except IntegrityError:
             await self.session.rollback()
             existing = await self.get(from_id, to_id)
-            return AddLikeResult(like=existing, status="exists")
+            if existing is None:
+                return AddLikeResult(like=None, status="rejected")
+            if existing.is_like == is_like:
+                return AddLikeResult(like=existing, status="exists")
+            existing.is_like = is_like
+            await self.session.commit()
+            await self.session.refresh(existing)
+            return AddLikeResult(like=existing, status="updated")
 
     async def has_mutual_like(self, a: int, b: int) -> bool:
         like_ab = await self.get(a, b)
@@ -373,7 +417,11 @@ class StatsRepo:
         self.session = session
 
     async def collect(self) -> Stats:
-        profiles = await self.session.scalar(select(func.count()).select_from(Profile))
+        profiles = await self.session.scalar(
+            select(func.count())
+            .select_from(Profile)
+            .where(Profile.is_complete.is_(True))
+        )
         active = await self.session.scalar(
             select(func.count()).select_from(Profile).where(
                 Profile.is_complete.is_(True),
@@ -385,6 +433,7 @@ class StatsRepo:
             select(func.count()).select_from(Profile).where(
                 Profile.is_complete.is_(True),
                 Profile.is_active.is_(False),
+                Profile.is_banned.is_(False),
             )
         )
         likes = await self.session.scalar(

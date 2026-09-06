@@ -11,6 +11,20 @@ from bot.handlers.errors import register_errors
 from bot.middlewares.db import BanMiddleware, DbSessionMiddleware
 
 
+def _make_storage(redis_url: str | None):
+    if not redis_url:
+        return MemoryStorage()
+    try:
+        from aiogram.fsm.storage.redis import RedisStorage
+
+        return RedisStorage.from_url(redis_url)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "REDIS_URL задан, но RedisStorage не поднялся — fallback MemoryStorage"
+        )
+        return MemoryStorage()
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -24,7 +38,8 @@ async def main() -> None:
 
     # Без parse_mode по умолчанию — в анкетах бывают символы < > &
     bot = Bot(token=config.bot_token)
-    dp = Dispatcher(storage=MemoryStorage())
+    storage = _make_storage(config.redis_url)
+    dp = Dispatcher(storage=storage)
     dp["config"] = config
 
     dp.update.middleware(DbSessionMiddleware(session_factory))
@@ -33,7 +48,10 @@ async def main() -> None:
     register_handlers(dp)
     register_errors(dp)
 
-    logging.info("Бот запущен. Ctrl+C — остановить.")
+    logging.info(
+        "Бот запущен (FSM: %s). Ctrl+C — остановить.",
+        type(storage).__name__,
+    )
     try:
         await dp.start_polling(bot, config=config)
     finally:

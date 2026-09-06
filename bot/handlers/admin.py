@@ -1,8 +1,11 @@
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
+
+import asyncio
 
 from bot import texts as t
 from bot.config import Config
@@ -215,24 +218,33 @@ async def _start_pick(
     await message.answer(prompt, reply_markup=admin_pick_kb())
 
 
-async def _send_broadcast(
+async def _broadcast_now(
     bot: Bot, session: AsyncSession, text: str, message: Message
 ) -> None:
-    ids = await ProfileRepo(session).all_telegram_ids(only_active=True)
+    ids = await ProfileRepo(session).all_telegram_ids(
+        only_complete=True, only_active=True
+    )
+    await _send_broadcast(bot, ids, text, message)
+
+
+async def _send_broadcast(bot: Bot, ids: list[int], text: str, message: Message) -> None:
+    """Шлём без дальнейших запросов к БД: ids уже загружены."""
     ok = fail = 0
-    for tg_id in ids:
+    for i, tg_id in enumerate(ids):
         try:
             await bot.send_message(tg_id, text)
             ok += 1
         except Exception:
             fail += 1
+        if i + 1 < len(ids):
+            await asyncio.sleep(0.05)
     await message.answer(t.BROADCAST_DONE.format(ok=ok, fail=fail, total=len(ids)))
 
 
 # --- Panel entry ---
 
 
-@router.message(F.text == t.BTN_ADMIN)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN)
 async def btn_admin(
     message: Message, state: FSMContext, bot: Bot, config: Config
 ) -> None:
@@ -266,7 +278,7 @@ async def btn_admin_back(
 # --- Admin submenu buttons ---
 
 
-@router.message(F.text == t.BTN_ADMIN_STATS)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN_STATS)
 async def btn_admin_stats(
     message: Message, state: FSMContext, session: AsyncSession, config: Config
 ) -> None:
@@ -276,7 +288,7 @@ async def btn_admin_stats(
     await _show_stats(message, session)
 
 
-@router.message(F.text == t.BTN_ADMIN_USERS)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN_USERS)
 async def btn_admin_users(
     message: Message, state: FSMContext, session: AsyncSession, config: Config
 ) -> None:
@@ -286,28 +298,28 @@ async def btn_admin_users(
     await _send_users_page(message, session, offset=0, action="view", config=config)
 
 
-@router.message(F.text == t.BTN_ADMIN_USER)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN_USER)
 async def btn_admin_user(message: Message, state: FSMContext, config: Config) -> None:
     if not _is_admin(message.from_user.id, config):
         return
     await _start_pick(message, state, action="view", prompt=t.ADMIN_PICK_VIEW)
 
 
-@router.message(F.text == t.BTN_ADMIN_BAN)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN_BAN)
 async def btn_admin_ban(message: Message, state: FSMContext, config: Config) -> None:
     if not _is_admin(message.from_user.id, config):
         return
     await _start_pick(message, state, action="ban", prompt=t.ADMIN_PICK_BAN)
 
 
-@router.message(F.text == t.BTN_ADMIN_UNBAN)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN_UNBAN)
 async def btn_admin_unban(message: Message, state: FSMContext, config: Config) -> None:
     if not _is_admin(message.from_user.id, config):
         return
     await _start_pick(message, state, action="unban", prompt=t.ADMIN_PICK_UNBAN)
 
 
-@router.message(F.text == t.BTN_ADMIN_BROADCAST)
+@router.message(StateFilter(default_state), F.text == t.BTN_ADMIN_BROADCAST)
 async def btn_admin_broadcast(
     message: Message, state: FSMContext, config: Config
 ) -> None:
@@ -519,7 +531,7 @@ async def cmd_broadcast(
         await state.set_state(AdminBroadcast.waiting_text)
         await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_back_kb())
         return
-    await _send_broadcast(bot, session, text, message)
+    await _broadcast_now(bot, session, text, message)
 
 
 @router.message(AdminBroadcast.waiting_text, F.text == t.CANCEL)
@@ -564,7 +576,7 @@ async def broadcast_text(
         return
     await state.clear()
     await message.answer(t.ADMIN_PANEL_TITLE, reply_markup=admin_menu_kb())
-    await _send_broadcast(bot, session, text, message)
+    await _broadcast_now(bot, session, text, message)
 
 
 @router.message(Command("ban"))
@@ -583,7 +595,7 @@ async def cmd_ban(
         await _start_pick(message, state, action="ban", prompt=t.ADMIN_PICK_BAN)
         return
     profile = await _resolve_profile(session, raw)
-    if not profile:
+    if not profile or not profile.is_complete:
         await message.answer(t.USER_NOT_FOUND)
         return
     await _apply_ban(message, session, profile, config, banned=True)

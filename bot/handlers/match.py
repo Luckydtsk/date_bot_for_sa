@@ -14,6 +14,9 @@ router = Router(name="match")
 async def match_ok(
     callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
 ) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
     await clear_tracked_keyboards(
         bot, callback.message.chat.id, state, also=callback.message
     )

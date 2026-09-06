@@ -13,10 +13,8 @@ def _is_sqlite(url: str) -> bool:
 def make_engine(database_url: str) -> AsyncEngine:
     kwargs: dict = {"echo": False}
     if _is_sqlite(database_url):
-        # Для локальной разработки
-        pass
+        kwargs["connect_args"] = {"timeout": 30}
     else:
-        # Postgres на Railway / проде
         kwargs["pool_pre_ping"] = True
 
     engine = create_async_engine(database_url, **kwargs)
@@ -27,6 +25,8 @@ def make_engine(database_url: str) -> AsyncEngine:
         def _set_sqlite_pragma(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.close()
 
     return engine
