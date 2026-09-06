@@ -127,6 +127,71 @@ def cancel_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def without_cancel(base: ReplyKeyboardMarkup) -> ReplyKeyboardMarkup:
+    """Reply-клавиатура без ряда «Назад» (для редактирования)."""
+    rows = [
+        list(row)
+        for row in base.keyboard
+        if not (len(row) == 1 and row[0].text == t.CANCEL)
+    ]
+    return ReplyKeyboardMarkup(keyboard=rows or [[KeyboardButton(text=t.SKIP)]], resize_keyboard=True)
+
+
+def edit_back_ikb() -> InlineKeyboardMarkup:
+    """«Назад» у сообщения — к списку полей."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t.CANCEL, callback_data="edit:back")],
+        ]
+    )
+
+
+def edit_gender_ikb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t.GENDER_MALE, callback_data="editset:gender:male"
+                ),
+                InlineKeyboardButton(
+                    text=t.GENDER_FEMALE, callback_data="editset:gender:female"
+                ),
+            ],
+            [InlineKeyboardButton(text=t.CANCEL, callback_data="edit:back")],
+        ]
+    )
+
+
+def edit_dance_ikb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=t.DANCE_NONE, callback_data="editset:dance:none"
+                ),
+                InlineKeyboardButton(
+                    text=t.DANCE_SOME, callback_data="editset:dance:some"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=t.DANCE_CONFIDENT, callback_data="editset:dance:confident"
+                ),
+            ],
+            [InlineKeyboardButton(text=t.CANCEL, callback_data="edit:back")],
+        ]
+    )
+
+
+def edit_height_ikb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=t.SKIP, callback_data="editset:height:skip")],
+            [InlineKeyboardButton(text=t.CANCEL, callback_data="edit:back")],
+        ]
+    )
+
+
 def yes_no_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[

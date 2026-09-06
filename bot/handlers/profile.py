@@ -20,15 +20,15 @@ from bot.education import (
 )
 from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
 from bot.keyboards.common import (
-    cancel_kb,
-    dance_kb,
+    edit_back_ikb,
+    edit_dance_ikb,
     edit_fields_kb,
-    gender_kb,
+    edit_gender_ikb,
+    edit_height_ikb,
     is_admin,
     menu_for,
     my_profile_kb,
     remove_kb,
-    skip_cancel_kb,
     with_main_menu,
     yes_no_kb,
 )
@@ -286,35 +286,124 @@ async def edit_abort_admin(
 async def edit_field_pick(
     callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
 ) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
     await clear_tracked_keyboards(
         bot, callback.message.chat.id, state, also=callback.message
     )
     field = callback.data.split(":", 1)[1]
+    if field == "back":
+        await callback.answer()
+        return
     uid = callback.from_user.id
-    mapping = {
-        "name": (EditProfile.name, t.ASK_NAME, _edit_kb(cancel_kb(), uid, config)),
-        "gender": (EditProfile.gender, t.ASK_GENDER, _edit_kb(gender_kb(), uid, config)),
+    mapping: dict = {
+        "name": (EditProfile.name, t.ASK_NAME, edit_back_ikb()),
+        "gender": (EditProfile.gender, t.ASK_GENDER, edit_gender_ikb()),
         "faculty": (
             EditProfile.edu_level,
             t.ASK_EDU_LEVEL,
             _edit_kb(level_kb(), uid, config),
         ),
-        "height": (
-            EditProfile.height,
-            t.ASK_HEIGHT,
-            _edit_kb(skip_cancel_kb(), uid, config),
-        ),
-        "dance": (EditProfile.dance, t.ASK_DANCE, _edit_kb(dance_kb(), uid, config)),
-        "about": (EditProfile.about, t.ASK_ABOUT, _edit_kb(cancel_kb(), uid, config)),
-        "photo": (EditProfile.photo, t.ASK_PHOTO, _edit_kb(cancel_kb(), uid, config)),
+        "height": (EditProfile.height, t.ASK_HEIGHT, edit_height_ikb()),
+        "dance": (EditProfile.dance, t.ASK_DANCE, edit_dance_ikb()),
+        "about": (EditProfile.about, t.ASK_ABOUT, edit_back_ikb()),
+        "photo": (EditProfile.photo, t.ASK_PHOTO, edit_back_ikb()),
     }
     if field not in mapping:
         await callback.answer()
         return
     st, text, kb = mapping[field]
     await state.set_state(st)
-    await callback.message.answer(text, reply_markup=kb)
+    sent = await callback.message.answer(text, reply_markup=kb)
+    await track_keyboard_message(state, sent)
     await callback.answer()
+
+
+@router.callback_query(StateFilter(EditProfile), F.data == "edit:back")
+async def edit_back_to_chooser(
+    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
+) -> None:
+    if not callback.message:
+        await callback.answer()
+        return
+    await clear_tracked_keyboards(
+        bot, callback.message.chat.id, state, also=callback.message
+    )
+    await _show_edit_chooser(callback.message, state, config)
+    await callback.answer()
+
+
+@router.callback_query(EditProfile.gender, F.data.startswith("editset:gender:"))
+async def edit_gender_cb(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+    config: Config,
+) -> None:
+    gender = callback.data.split(":")[-1]
+    if gender not in {"male", "female"}:
+        await callback.answer()
+        return
+    profile = await require_profile(session, callback.from_user.id)
+    if not profile:
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    await clear_tracked_keyboards(
+        bot, callback.message.chat.id, state, also=callback.message
+    )
+    await ProfileRepo(session).update_fields(
+        profile,
+        gender=gender,
+        looking_for=opposite_gender(gender),
+    )
+    await callback.answer()
+    await _after_edit(callback.message, state, session, bot, config)
+
+
+@router.callback_query(EditProfile.dance, F.data.startswith("editset:dance:"))
+async def edit_dance_cb(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+    config: Config,
+) -> None:
+    dance = callback.data.split(":")[-1]
+    if dance not in {"none", "some", "confident"}:
+        await callback.answer()
+        return
+    profile = await require_profile(session, callback.from_user.id)
+    if not profile:
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    await clear_tracked_keyboards(
+        bot, callback.message.chat.id, state, also=callback.message
+    )
+    await ProfileRepo(session).update_fields(profile, dance_experience=dance)
+    await callback.answer()
+    await _after_edit(callback.message, state, session, bot, config)
+
+
+@router.callback_query(EditProfile.height, F.data == "editset:height:skip")
+async def edit_height_skip_cb(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    bot: Bot,
+    config: Config,
+) -> None:
+    profile = await require_profile(session, callback.from_user.id)
+    if not profile:
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    await clear_tracked_keyboards(
+        bot, callback.message.chat.id, state, also=callback.message
+    )
+    await ProfileRepo(session).update_fields(profile, height=None)
+    await callback.answer()
+    await _after_edit(callback.message, state, session, bot, config)
 
 
 async def _after_edit(
@@ -345,7 +434,10 @@ async def edit_name(
         return
     name = (message.text or "").strip()
     if not (1 <= len(name) <= 50):
-        await message.answer(t.NAME_TOO_LONG if len(name) > 50 else t.NEED_TEXT)
+        await message.answer(
+            t.NAME_TOO_LONG if len(name) > 50 else t.NEED_TEXT,
+            reply_markup=edit_back_ikb(),
+        )
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
@@ -368,10 +460,7 @@ async def edit_gender(
         return
     gender = GENDER_MAP.get(message.text or "")
     if not gender:
-        await message.answer(
-            t.FSM_USE_BUTTONS,
-            reply_markup=_edit_kb(gender_kb(), message.from_user.id, config),
-        )
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=edit_gender_ikb())
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
@@ -531,10 +620,7 @@ async def edit_height(
     if message.text != t.SKIP:
         raw = (message.text or "").strip().replace("см", "").strip()
         if not raw.isdigit() or not (100 <= int(raw) <= 250):
-            await message.answer(
-                t.INVALID_HEIGHT,
-                reply_markup=_edit_kb(skip_cancel_kb(), message.from_user.id, config),
-            )
+            await message.answer(t.INVALID_HEIGHT, reply_markup=edit_height_ikb())
             return
         height = int(raw)
     profile = await require_profile(session, message.from_user.id)
@@ -558,10 +644,7 @@ async def edit_dance(
         return
     dance = DANCE_MAP.get(message.text or "")
     if not dance:
-        await message.answer(
-            t.FSM_USE_BUTTONS,
-            reply_markup=_edit_kb(dance_kb(), message.from_user.id, config),
-        )
+        await message.answer(t.FSM_USE_BUTTONS, reply_markup=edit_dance_ikb())
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
@@ -584,10 +667,10 @@ async def edit_about(
         return
     about = (message.text or "").strip()
     if len(about) < 5:
-        await message.answer(t.ABOUT_TOO_SHORT)
+        await message.answer(t.ABOUT_TOO_SHORT, reply_markup=edit_back_ikb())
         return
     if len(about) > 400:
-        await message.answer(t.ABOUT_TOO_LONG)
+        await message.answer(t.ABOUT_TOO_LONG, reply_markup=edit_back_ikb())
         return
     profile = await require_profile(session, message.from_user.id)
     if not profile:
@@ -624,11 +707,8 @@ async def edit_photo_cancel(
 
 
 @router.message(EditProfile.photo)
-async def edit_photo_invalid(message: Message, config: Config) -> None:
-    await message.answer(
-        t.NEED_PHOTO,
-        reply_markup=_edit_kb(cancel_kb(), message.from_user.id, config),
-    )
+async def edit_photo_invalid(message: Message) -> None:
+    await message.answer(t.NEED_PHOTO, reply_markup=edit_back_ikb())
 
 
 @router.message(StateFilter(EditProfile))
