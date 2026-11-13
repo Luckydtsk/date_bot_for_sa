@@ -5,9 +5,7 @@ class Registration(StatesGroup):
     name = State()
     gender = State()
     edu_level = State()
-    edu_program = State()
-    edu_course = State()
-    edu_group = State()
+    faculty = State()
     height = State()
     dance = State()
     about = State()
@@ -19,10 +17,7 @@ class EditProfile(StatesGroup):
     choose_field = State()
     name = State()
     gender = State()
-    edu_level = State()
-    edu_program = State()
-    edu_course = State()
-    edu_group = State()
+    faculty = State()
     height = State()
     dance = State()
     about = State()
@@ -30,6 +25,10 @@ class EditProfile(StatesGroup):
     contact = State()
     confirm_delete = State()
     confirm_refill = State()
+
+
+class Feed(StatesGroup):
+    browsing = State()
 
 
 class AdminBroadcast(StatesGroup):

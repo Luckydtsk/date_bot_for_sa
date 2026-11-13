@@ -39,6 +39,7 @@ class Profile(Base):
     about: Mapped[str] = mapped_column(String(400))
     photo_file_id: Mapped[str] = mapped_column(String(512))
     contact: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    feed_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # False = на паузе
     is_banned: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -49,7 +49,8 @@ async def _open_section(
     if not await _ready(message, state, session):
         return False
     data = await state.get_data()
-    note = _leave_note(await state.get_state(), data)
+    state_name = await state.get_state()
+    note = _leave_note(state_name, data)
     await state.clear()
     if note:
         await message.answer(note, parse_mode="HTML")
@@ -89,6 +90,9 @@ async def cmd_help(message: Message, state: FSMContext, session: AsyncSession, c
     profile = await require_profile(session, message.from_user.id)
     data = await state.get_data()
     state_name = await state.get_state()
+    if state_name and state_name.startswith("Feed"):
+        await state.clear()
+        state_name = None
     extra = ""
     if data.get("refill"):
         extra = t.HELP_WHILE_REFILL
@@ -131,7 +135,7 @@ async def menu_browse(
 ) -> None:
     if not await _open_section(message, state, session):
         return
-    await open_feed(message, session, config)
+    await open_feed(message, session, config, state)
 
 
 @router.message(F.text == t.BTN_LIKES_ME)

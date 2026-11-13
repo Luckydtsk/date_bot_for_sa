@@ -75,54 +75,20 @@ def dance_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def feed_kb(
-    profile_id: int,
-    mode: str,
-    *,
-    index: int,
-    total: int,
-    write_url: str | None = None,
-) -> InlineKeyboardMarkup:
-    code = {"all": "a", "new": "u", "liked": "l", "nope": "d"}[mode]
-
-    def act(text: str, action: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(
-            text=text, callback_data=f"f:{action}:{code}:{profile_id}"
-        )
-
-    def filt(text: str, mcode: str, active: bool) -> InlineKeyboardButton:
-        label = f"✓ {text}" if active else text
-        return InlineKeyboardButton(
-            text=label, callback_data=f"f:f:{mcode}:{profile_id}"
-        )
-
-    rows: list[list[InlineKeyboardButton]] = [
-        [
-            act("←", "p"),
-            InlineKeyboardButton(text=f"{index}/{total}", callback_data="f:noop"),
-            act("→", "n"),
+def feed_controls_kb() -> ReplyKeyboardMarkup:
+    """Листание вместо меню, пока человек в анкетах."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=t.BTN_BACK), KeyboardButton(text=t.FEED_NEXT)],
+            [KeyboardButton(text=t.BTN_LIKE), KeyboardButton(text=t.BTN_NOPE)],
+            [
+                KeyboardButton(text=t.FEED_ALL),
+                KeyboardButton(text=t.FEED_LIKED),
+                KeyboardButton(text=t.FEED_DISLIKED),
+            ],
+            [KeyboardButton(text=t.BTN_ADMIN_BACK)],
         ],
-        [act(t.BTN_LIKE, "y"), act(t.BTN_NOPE, "x")],
-        [filt("Все", "a", mode == "all"), filt("Новые", "u", mode == "new")],
-        [filt("Мои ❤️", "l", mode == "liked"), filt("Мои 👎", "d", mode == "nope")],
-    ]
-    if write_url:
-        rows.append([InlineKeyboardButton(text=t.BTN_WRITE, url=write_url)])
-    rows.append([InlineKeyboardButton(text=t.BTN_CLOSE, callback_data="f:c")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def feed_filters_kb() -> InlineKeyboardMarkup:
-    """Фильтры, когда в текущей подборке пусто. id 0 — открыть первую анкету."""
-
-    def filt(text: str, mcode: str) -> InlineKeyboardButton:
-        return InlineKeyboardButton(text=text, callback_data=f"f:f:{mcode}:0")
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [filt("Все", "a"), filt("Новые", "u")],
-            [filt("Мои ❤️", "l"), filt("Мои 👎", "d")],
-        ]
+        resize_keyboard=True,
     )
 
 
@@ -181,7 +147,7 @@ def edit_fields_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="Пол", callback_data="edit:gender"),
-                InlineKeyboardButton(text="Группа", callback_data="edit:faculty"),
+                InlineKeyboardButton(text="Учёба", callback_data="edit:faculty"),
             ],
             [
                 InlineKeyboardButton(text="Рост", callback_data="edit:height"),

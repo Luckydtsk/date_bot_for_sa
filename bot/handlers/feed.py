@@ -1,25 +1,41 @@
-"""Лента: все анкеты по кругу, решение можно поменять."""
+"""Лента: одна анкета на заход. Кнопки внизу меняют её, новую не шлют."""
+
+import logging
 
 from aiogram import Bot, F, Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, InputMediaPhoto, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts as t
 from bot.config import Config
 from bot.db.models import Profile
 from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo
-from bot.keyboards.common import feed_filters_kb, feed_kb, menu_for
+from bot.keyboards.common import feed_controls_kb, menu_for
+from bot.live_buttons import discard
 from bot.services import (
     EMPTY_BY_MODE,
-    MODE_BY_CODE,
     can_see,
-    deliver_photo,
     process_reaction,
     require_profile,
     touch_username,
 )
+from bot.states.profile import Feed
 
+logger = logging.getLogger(__name__)
 router = Router(name="feed")
+
+# Сообщение, на котором держится нижняя панель. Его нельзя стирать, пока человек в анкетах:
+# вместе с ним Telegram убирает кнопки.
+_feed_keys: dict[int, int] = {}
+
+_FILTERS = {
+    t.FEED_ALL: "all",
+    t.FEED_LIKED: "liked",
+    t.FEED_DISLIKED: "nope",
+}
 
 
 async def _ids(session: AsyncSession, viewer: Profile, mode: str) -> list[int]:
@@ -37,210 +53,275 @@ def _decision(profile: Profile, like, matched: bool) -> str:
     return t.DECISION_NOPE
 
 
+async def _caption(
+    session: AsyncSession,
+    viewer: Profile,
+    profile: Profile,
+    *,
+    index: int,
+    total: int,
+    mode: str,
+    note: str = "",
+) -> str:
+    like = await LikeRepo(session).get(viewer.id, profile.id)
+    matched = bool(like and like.is_like and await MatchRepo(session).get(viewer.id, profile.id))
+    body = t.feed_caption(
+        profile,
+        index=index,
+        total=total,
+        mode=mode,
+        decision=_decision(profile, like, matched),
+    )
+    if note:
+        return f"{note}\n\n{body}"
+    return body
+
+
+async def _shift_press(message: Message, state: FSMContext) -> dict:
+    """В ленте новое нажатие остаётся, предыдущее стираем. Вне ленты это не вызывается."""
+    data = await state.get_data()
+    prev = data.get("press_id")
+    if prev and int(prev) != message.message_id:
+        await discard(message.bot, message.chat.id, int(prev))
+    await state.update_data(press_id=message.message_id)
+    return data
+
+
+async def _paint(
+    bot: Bot,
+    chat_id: int,
+    old_id: int | None,
+    profile: Profile,
+    caption: str,
+) -> int | None:
+    """Правит уже открытую анкету. Новое фото — только когда карточки ещё нет.
+
+    На фото нельзя вешать нижнюю клавиатуру: с ней Telegram не даёт править сообщение.
+    """
+    if old_id:
+        media = InputMediaPhoto(media=profile.photo_file_id, caption=caption, parse_mode="HTML")
+        try:
+            await bot.edit_message_media(chat_id=chat_id, message_id=int(old_id), media=media)
+        except TelegramBadRequest as exc:
+            if "not modified" not in str(exc).lower():
+                logger.warning("Анкету не поправил: %s", exc)
+        return int(old_id)
+    sent = await bot.send_photo(
+        chat_id,
+        photo=profile.photo_file_id,
+        caption=caption,
+        parse_mode="HTML",
+    )
+    return sent.message_id
+
+
+async def _remember(
+    state: FSMContext, *, mode: str, profile_id: int | None, message_id: int | None
+) -> None:
+    await state.update_data(mode=mode, profile_id=profile_id, card_id=message_id, notice_id=None)
+
+
 async def _show(
-    message: Message,
+    bot: Bot,
+    chat_id: int,
+    state: FSMContext,
     session: AsyncSession,
     viewer: Profile,
     profile_id: int,
     mode: str,
     *,
-    edit: bool,
+    note: str = "",
 ) -> None:
+    data = await state.get_data()
     ids = await _ids(session, viewer, mode)
     if not ids or profile_id not in ids:
-        await _empty(message, mode, edit=edit)
+        await _empty(bot, chat_id, state, mode, card_id=data.get("card_id"))
         return
     index = ids.index(profile_id)
     profile = await ProfileRepo(session).get_by_id(profile_id)
     if profile is None:
-        await _empty(message, mode, edit=edit)
+        await _empty(bot, chat_id, state, mode, card_id=data.get("card_id"))
         return
-    like = await LikeRepo(session).get(viewer.id, profile.id)
-    matched = bool(like and like.is_like and await MatchRepo(session).get(viewer.id, profile.id))
-    caption = t.feed_caption(
-        profile,
-        index=index + 1,
-        total=len(ids),
-        mode=mode,
-        decision=_decision(profile, like, matched),
+    caption = await _caption(
+        session, viewer, profile, index=index + 1, total=len(ids), mode=mode, note=note
     )
-    write = f"https://t.me/{profile.username}" if matched and profile.username else None
-    await deliver_photo(
-        message,
-        profile.photo_file_id,
-        caption,
-        feed_kb(profile.id, mode, index=index + 1, total=len(ids), write_url=write),
-        edit=edit,
-    )
+    card_id = await _paint(bot, chat_id, data.get("card_id"), profile, caption)
+    if card_id is None:
+        return
+    await _remember(state, mode=mode, profile_id=profile.id, message_id=card_id)
 
 
-async def _empty(message: Message, mode: str, *, edit: bool) -> None:
-    if edit:
+async def _empty(bot: Bot, chat_id: int, state: FSMContext, mode: str, *, card_id: int | None) -> None:
+    text = EMPTY_BY_MODE.get(mode, t.FEED_EMPTY_ALL)
+    if card_id:
         try:
-            await message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    await message.answer(
-        f"{EMPTY_BY_MODE.get(mode, t.FEED_EMPTY_ALL)}\n\n{t.FEED_FOOTER_EMPTY}",
-        reply_markup=feed_filters_kb(),
-    )
+            await bot.edit_message_caption(
+                chat_id=chat_id, message_id=int(card_id), caption=text
+            )
+        except TelegramBadRequest as exc:
+            if "not modified" not in str(exc).lower():
+                logger.warning("Пустую подборку не вписал в ту же анкету: %s", exc)
+        await state.update_data(mode=mode, profile_id=None, card_id=card_id, notice_id=None)
+        return
+    sent = await bot.send_message(chat_id, text)
+    await state.update_data(mode=mode, profile_id=None, card_id=sent.message_id, notice_id=None)
 
 
-async def open_feed(message: Message, session: AsyncSession, config: Config) -> None:
+async def open_feed(
+    message: Message, session: AsyncSession, config: Config, state: FSMContext
+) -> None:
     viewer = await require_profile(session, message.from_user.id)
     if not viewer:
         await message.answer(t.NO_PROFILE, reply_markup=menu_for(message.from_user.id, config))
         return
     await touch_username(session, viewer, message.from_user.username)
-    menu = menu_for(message.from_user.id, config)
     ids = await _ids(session, viewer, "all")
     if not ids:
         text = t.FEED_EMPTY_ALL
         if not viewer.is_active:
             text += f"\n\nТвоя анкета скрыта. Включить — {t.BTN_MY_PROFILE}."
-        await message.answer(text, reply_markup=menu)
+        await state.clear()
+        await message.answer(text, reply_markup=menu_for(message.from_user.id, config))
         return
-    fresh = len(await _ids(session, viewer, "new"))
-    await message.answer(
-        t.feed_intro(len(ids), fresh, hidden=not viewer.is_active),
-        reply_markup=menu,
+    note = ""
+    if not viewer.is_active:
+        note = f"Твоя анкета скрыта. Включить — {t.BTN_MY_PROFILE}."
+    await state.set_state(Feed.browsing)
+    await state.update_data(
+        mode="all",
+        profile_id=None,
+        card_id=None,
+        press_id=message.message_id,
+        notice_id=None,
     )
-    await _show(message, session, viewer, ids[0], "all", edit=False)
+    # Панель живёт на отдельном сообщении: на фото её вешать нельзя, фото тогда не правится.
+    # Это сообщение не стираем — иначе пропадают нижние кнопки.
+    previous = _feed_keys.get(message.chat.id)
+    keyboard = await message.answer("\u2060", reply_markup=feed_controls_kb())
+    _feed_keys[message.chat.id] = keyboard.message_id
+    await _show(message.bot, message.chat.id, state, session, viewer, ids[0], "all", note=note)
+    if previous and previous != keyboard.message_id:
+        await discard(message.bot, message.chat.id, previous)
 
 
-def _parse(data: str) -> tuple[str, str, int] | None:
-    parts = (data or "").split(":")
-    if len(parts) != 4 or parts[0] != "f":
-        return None
-    action, code, raw = parts[1], parts[2], parts[3]
-    if action not in {"n", "p", "y", "x", "f"} or code not in MODE_BY_CODE:
-        return None
-    if not raw.isdigit():
-        return None
-    return action, MODE_BY_CODE[code], int(raw)
+async def _viewer(session: AsyncSession, message: Message) -> Profile | None:
+    return await require_profile(session, message.from_user.id)
 
 
-async def _ack(callback: CallbackQuery, text: str = "", *, alert: bool = False) -> None:
-    try:
-        await callback.answer(text, show_alert=alert)
-    except Exception:
-        pass
+@router.message(Feed.browsing, F.text == t.FEED_NEXT)
+@router.message(Feed.browsing, F.text == t.BTN_BACK)
+async def feed_move(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    data = await _shift_press(message, state)
+    viewer = await _viewer(session, message)
+    if not viewer:
+        await message.answer(t.NO_PROFILE)
+        return
+    mode = data.get("mode") or "all"
+    ids = await _ids(session, viewer, mode)
+    if not ids:
+        await _empty(message.bot, message.chat.id, state, mode, card_id=data.get("card_id"))
+        return
+    current = data.get("profile_id")
+    if current not in ids:
+        target = ids[0]
+    else:
+        delta = 1 if message.text == t.FEED_NEXT else -1
+        target = ids[(ids.index(current) + delta) % len(ids)]
+    await _show(message.bot, message.chat.id, state, session, viewer, target, mode)
 
 
-@router.callback_query(F.data == "f:noop")
-async def feed_noop(callback: CallbackQuery) -> None:
-    await _ack(callback)
+@router.message(Feed.browsing, F.text.in_(_FILTERS))
+async def feed_filter(message: Message, session: AsyncSession, state: FSMContext) -> None:
+    data = await _shift_press(message, state)
+    viewer = await _viewer(session, message)
+    if not viewer:
+        await message.answer(t.NO_PROFILE)
+        return
+    mode = _FILTERS[message.text or ""]
+    ids = await _ids(session, viewer, mode)
+    if not ids:
+        await _empty(message.bot, message.chat.id, state, mode, card_id=data.get("card_id"))
+        return
+    await _show(message.bot, message.chat.id, state, session, viewer, ids[0], mode)
 
 
-@router.callback_query(F.data == "f:c")
-async def feed_close(callback: CallbackQuery) -> None:
+@router.message(Feed.browsing, F.text.in_({t.BTN_LIKE, t.BTN_NOPE}))
+async def feed_react(message: Message, session: AsyncSession, state: FSMContext, bot: Bot) -> None:
+    data = await _shift_press(message, state)
+    viewer = await _viewer(session, message)
+    if not viewer:
+        await message.answer(t.NO_PROFILE)
+        return
+    mode = data.get("mode") or "all"
+    profile_id = data.get("profile_id")
+    if not profile_id:
+        await _empty(bot, message.chat.id, state, "all", card_id=data.get("card_id"))
+        return
+    target = await ProfileRepo(session).get_by_id(int(profile_id))
+    if not can_see(viewer, target) or target is None:
+        ids = await _ids(session, viewer, mode)
+        if ids:
+            await _show(bot, message.chat.id, state, session, viewer, ids[0], mode)
+        else:
+            await _empty(bot, message.chat.id, state, mode, card_id=data.get("card_id"))
+        return
+
+    before = await _ids(session, viewer, mode)
+    pos = before.index(target.id) if target.id in before else 0
+    is_like = message.text == t.BTN_LIKE
+    outcome = await process_reaction(
+        bot,
+        session,
+        viewer,
+        target,
+        is_like=is_like,
+        quiet_for=viewer.telegram_id,
+    )
+    if outcome.status == "rejected":
+        return
+
+    note = ""
+    if outcome.matched:
+        note = t.TOAST_MATCH
+    elif outcome.unmatched:
+        note = t.TOAST_UNMATCH
+
+    after = await _ids(session, viewer, mode)
+    if target.id in after:
+        await _show(bot, message.chat.id, state, session, viewer, target.id, mode, note=note)
+    elif after:
+        await _show(
+            bot,
+            message.chat.id,
+            state,
+            session,
+            viewer,
+            after[min(pos, len(after) - 1)],
+            mode,
+            note=note,
+        )
+    else:
+        await _empty(bot, message.chat.id, state, mode, card_id=data.get("card_id"))
+
+
+@router.message(Feed.browsing, F.text)
+async def feed_unknown(message: Message, state: FSMContext) -> None:
+    await _shift_press(message, state)
+
+
+@router.callback_query(F.data.startswith("f:"))
+async def old_feed_buttons(callback: CallbackQuery) -> None:
     if callback.message:
         try:
             await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-    await _ack(callback, t.TOAST_CLOSED)
+    try:
+        await callback.answer("Листай кнопками внизу.")
+    except Exception:
+        pass
 
 
-@router.callback_query(F.data.startswith("f:"))
-async def feed_action(
-    callback: CallbackQuery, session: AsyncSession, bot: Bot
-) -> None:
-    parsed = _parse(callback.data or "")
-    if parsed is None or callback.message is None:
-        await _ack(callback, t.STALE_BUTTON, alert=True)
-        return
-    action, mode, profile_id = parsed
-    viewer = await require_profile(session, callback.from_user.id)
-    if not viewer:
-        await _ack(callback, t.NO_PROFILE, alert=True)
-        return
-
-    if action == "f":
-        ids = await _ids(session, viewer, mode)
-        if not ids:
-            await _empty(callback.message, mode, edit=True)
-            await _ack(callback)
-            return
-        if profile_id == 0:
-            try:
-                await callback.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
-        target_id = profile_id if profile_id in ids else ids[0]
-        await _show(
-            callback.message,
-            session,
-            viewer,
-            target_id,
-            mode,
-            edit=bool(callback.message.photo) and profile_id != 0,
-        )
-        await _ack(callback)
-        return
-
-    ids = await _ids(session, viewer, mode)
-    if action in {"n", "p"}:
-        if not ids:
-            await _empty(callback.message, mode, edit=True)
-            await _ack(callback)
-            return
-        if profile_id not in ids:
-            await _show(callback.message, session, viewer, ids[0], mode, edit=True)
-            await _ack(callback, t.TOAST_GONE)
-            return
-        pos = ids.index(profile_id)
-        delta = 1 if action == "n" else -1
-        new_pos = (pos + delta) % len(ids)
-        wrapped = len(ids) > 1 and (
-            (delta > 0 and pos == len(ids) - 1) or (delta < 0 and pos == 0)
-        )
-        await _show(callback.message, session, viewer, ids[new_pos], mode, edit=True)
-        await _ack(callback, t.TOAST_WRAP if wrapped else "")
-        return
-
-    target = await ProfileRepo(session).get_by_id(profile_id)
-    if not can_see(viewer, target) or target is None:
-        ids = await _ids(session, viewer, mode)
-        if ids:
-            await _show(callback.message, session, viewer, ids[0], mode, edit=True)
-        else:
-            await _empty(callback.message, mode, edit=True)
-        await _ack(callback, t.TOAST_GONE, alert=True)
-        return
-
-    before = await _ids(session, viewer, mode)
-    pos = before.index(profile_id) if profile_id in before else 0
-    outcome = await process_reaction(
-        bot, session, viewer, target, is_like=(action == "y")
-    )
-    if outcome.status == "rejected":
-        await _ack(callback, t.TOAST_GONE, alert=True)
-        return
-
-    after = await _ids(session, viewer, mode)
-    if profile_id in after:
-        await _show(callback.message, session, viewer, profile_id, mode, edit=True)
-    elif after:
-        await _show(
-            callback.message,
-            session,
-            viewer,
-            after[min(pos, len(after) - 1)],
-            mode,
-            edit=True,
-        )
-    else:
-        await _empty(callback.message, mode, edit=True)
-
-    if outcome.matched:
-        toast, alert = t.TOAST_MATCH, True
-    elif outcome.unmatched:
-        toast, alert = t.TOAST_UNMATCH, True
-    elif outcome.status == "exists":
-        toast, alert = t.TOAST_SAME, False
-    elif action == "y":
-        toast, alert = t.TOAST_LIKE, False
-    else:
-        toast, alert = t.TOAST_NOPE, False
-    await _ack(callback, toast, alert=alert)
+@router.message(StateFilter(Feed))
+async def feed_other(message: Message, state: FSMContext) -> None:
+    await _shift_press(message, state)

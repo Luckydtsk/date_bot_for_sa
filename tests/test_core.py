@@ -12,7 +12,7 @@ from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo
 from bot.db.session import init_db, make_engine, make_session_factory
 from bot.education import format_group, intake_year_short
 from bot.handlers import setup_routers
-from bot.keyboards.common import feed_kb, main_menu_kb
+from bot.keyboards.common import feed_controls_kb, likes_kb, main_menu_kb
 from bot.services import can_see, process_reaction
 
 
@@ -75,30 +75,29 @@ def test_guide_names_every_control():
         t.BTN_CANCEL,
     ):
         assert label in guide
-    assert "/cancel" in guide
-    assert "/help" in guide
-    assert "/start" in guide
+    assert "/start" not in guide
+    assert "/help" not in guide
+    assert "/cancel" not in guide
     assert "поменять" in guide
     assert "по кругу" in guide
-    assert "Мои ❤️" in guide
-    assert "Мои 👎" in guide
-    assert len(guide) < 4000
+    assert len(guide) < 700
 
     back = t.welcome_back("Маша")
-    for label in (t.BTN_BROWSE, t.BTN_LIKES_ME, t.BTN_MATCHES, t.BTN_MY_PROFILE, t.BTN_HELP):
-        assert label in back
+    assert t.BTN_HELP in back
     assert "<b>Маша</b>" in back
-    assert t.BTN_CANCEL in t.REG_DONE
+    assert "/start" not in back
+    assert "/cancel" not in t.REG_DONE
 
 
 def test_step_tells_how_to_leave():
     first = t.step(1, 10, "Имя", "Как зовут", back=False)
     later = t.step(4, 10, "Курс", "Выбери", back=True)
     assert t.BTN_CANCEL in first
-    assert "/cancel" in first
+    assert "/cancel" not in first
     assert t.BTN_BACK not in first
     assert t.BTN_BACK in later
     assert "<b>Шаг 4 из 10</b>" in later
+    assert "/cancel" not in later
 
 
 def test_card_escapes_html_and_fits_caption():
@@ -139,17 +138,37 @@ def test_card_escapes_html_and_fits_caption():
 def test_menu_buttons_do_not_repeat_and_callbacks_fit():
     labels = [button.text for row in main_menu_kb(is_admin=True).keyboard for button in row]
     assert len(labels) == len(set(labels))
-    kb = feed_kb(15, "liked", index=2, total=8, write_url="https://t.me/ann")
+    feed = [button.text for row in feed_controls_kb().keyboard for button in row]
+    assert t.BTN_BACK in feed
+    assert t.FEED_NEXT in feed
+    assert t.BTN_LIKE in feed
+    assert t.BTN_NOPE in feed
+    assert t.FEED_LIKED in feed
+    assert t.FEED_DISLIKED in feed
+    assert t.BTN_WRITE not in feed
+    assert t.BTN_CLOSE not in feed
     callbacks = [
         button.callback_data
-        for row in kb.inline_keyboard
+        for row in likes_kb(15).inline_keyboard
         for button in row
         if button.callback_data
     ]
     assert callbacks
     assert all(len(item.encode()) <= 64 for item in callbacks)
-    assert any(item.startswith("f:y:") for item in callbacks)
-    assert any(item.startswith("f:x:") for item in callbacks)
+
+
+def test_faculty_question_is_free_text():
+    blob = " ".join(
+        (
+            t.ASK_FACULTY_TITLE,
+            t.ASK_FACULTY_BODY,
+            t.ASK_LEVEL_BODY,
+            t.HELP_FULL,
+        )
+    )
+    for program in ("РИС", "МПБЭ", "ИЯ"):
+        assert program not in blob
+    assert "кнопк" not in t.ASK_FACULTY_BODY.lower()
 
 
 def test_group_year_follows_the_school_year():

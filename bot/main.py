@@ -3,13 +3,20 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, BotCommandScopeChat
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+)
 
 from bot.config import load_config, safe_db_label
 from bot.db.repositories import ProfileRepo
 from bot.db.session import init_db, make_engine, make_session_factory
 from bot.handlers import register_handlers
 from bot.handlers.errors import register_errors
+from bot.live_buttons import ClearButtonsMiddleware
 from bot.middlewares.db import BanMiddleware, DbSessionMiddleware
 
 logger = logging.getLogger(__name__)
@@ -40,7 +47,19 @@ def _make_storage(redis_url: str | None):
 
 
 async def _setup_commands(bot: Bot, admin_ids: frozenset[int]) -> None:
-    await bot.set_my_commands(USER_COMMANDS)
+    """Меню со / видно только админу. У остальных список команд пустой.
+
+    «Старт» в чате всё равно открывает бота: Telegram шлёт /start сам.
+    """
+    for scope in (
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+    ):
+        try:
+            await bot.delete_my_commands(scope=scope)
+        except Exception:
+            logger.info("Не удалось очистить общее меню команд")
     for admin_id in admin_ids:
         try:
             await bot.set_my_commands(
@@ -73,6 +92,8 @@ async def main() -> None:
     dp["config"] = config
     dp.update.middleware(DbSessionMiddleware(session_factory))
     dp.update.middleware(BanMiddleware())
+    dp.message.middleware(ClearButtonsMiddleware())
+    dp.callback_query.middleware(ClearButtonsMiddleware())
     register_handlers(dp)
     register_errors(dp)
     await _setup_commands(bot, config.admin_ids)

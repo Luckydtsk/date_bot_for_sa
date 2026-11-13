@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import texts as t
 from bot.db.models import Profile
 from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo, ReactionOutcome
+from bot.live_buttons import arm
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +100,17 @@ async def deliver_photo(
 ) -> Message | None:
     if edit:
         try:
-            return await message.edit_media(
+            edited = await message.edit_media(
                 media=InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML"),
                 reply_markup=reply_markup,
             )
+            if reply_markup is not None and edited is not None:
+                await arm(message.bot, edited.chat.id, edited.message_id)
+            return edited
         except TelegramBadRequest as exc:
             if "message is not modified" in str(exc).lower():
+                if reply_markup is not None:
+                    await arm(message.bot, message.chat.id, message.message_id)
                 return message
             logger.info("Не удалось обновить карточку, отправлю новую: %s", exc)
             try:
@@ -114,7 +120,7 @@ async def deliver_photo(
         except Exception:
             logger.exception("edit_media failed")
     try:
-        return await message.answer_photo(
+        sent = await message.answer_photo(
             photo=file_id,
             caption=caption,
             parse_mode="HTML",
@@ -123,10 +129,13 @@ async def deliver_photo(
     except Exception:
         logger.warning("Фото не ушло, пробую текстом")
         try:
-            return await message.answer(caption, parse_mode="HTML", reply_markup=reply_markup)
+            sent = await message.answer(caption, parse_mode="HTML", reply_markup=reply_markup)
         except Exception:
             logger.exception("Подпись с HTML не ушла")
-            return await message.answer(caption, reply_markup=reply_markup)
+            sent = await message.answer(caption, reply_markup=reply_markup)
+    if reply_markup is not None and sent is not None:
+        await arm(message.bot, sent.chat.id, sent.message_id)
+    return sent
 
 
 async def send_profile_card(
@@ -140,22 +149,23 @@ async def send_profile_card(
     return await deliver_photo(message, profile.photo_file_id, caption, reply_markup)
 
 
-async def notify_match(bot, session: AsyncSession, a: Profile, b: Profile) -> None:
-    from bot.keyboards.common import match_kb
-
+async def notify_match(
+    bot, session: AsyncSession, a: Profile, b: Profile, *, quiet_for: int | None = None
+) -> None:
     match_repo = MatchRepo(session)
     _, created = await match_repo.create_if_needed(a.id, b.id)
     if not created:
         return
 
     for me, other in ((a, b), (b, a)):
+        if quiet_for is not None and me.telegram_id == quiet_for:
+            continue
         try:
             await bot.send_photo(
                 chat_id=me.telegram_id,
                 photo=other.photo_file_id,
                 caption=match_text(other),
                 parse_mode="HTML",
-                reply_markup=match_kb(other.username),
             )
         except Exception:
             logger.warning("Не удалось прислать пару tg=%s", me.telegram_id)
@@ -164,7 +174,6 @@ async def notify_match(bot, session: AsyncSession, a: Profile, b: Profile) -> No
                     chat_id=me.telegram_id,
                     text=match_text(other),
                     parse_mode="HTML",
-                    reply_markup=match_kb(other.username),
                 )
             except Exception:
                 logger.warning("Пара текстом тоже не ушла tg=%s", me.telegram_id)
@@ -177,6 +186,7 @@ async def process_reaction(
     target: Profile,
     *,
     is_like: bool,
+    quiet_for: int | None = None,
 ) -> ReactionOutcome:
     if not can_see(viewer, target):
         return ReactionOutcome(status="rejected")
@@ -192,7 +202,7 @@ async def process_reaction(
     if is_like:
         mutual = await like_repo.has_mutual_like(viewer.id, target.id)
         if mutual:
-            await notify_match(bot, session, viewer, target)
+            await notify_match(bot, session, viewer, target, quiet_for=quiet_for)
             return ReactionOutcome(status=result.status, matched=True)
         if result.status == "created":
             try:

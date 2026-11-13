@@ -13,6 +13,7 @@ from bot.config import Config
 from bot.db.models import Profile
 from bot.db.repositories import ProfileRepo, StatsRepo
 from bot.keyboards.common import admin_panel_kb, admin_pick_kb, is_admin
+from bot.live_buttons import answer_inline
 from bot.services import deliver_photo
 from bot.states.profile import AdminBroadcast, AdminPickUser
 
@@ -83,9 +84,7 @@ async def open_admin_panel(message: Message, config: Config) -> None:
     if not is_admin(message.from_user.id, config):
         await message.answer(t.ADMIN_ONLY)
         return
-    await message.answer(
-        t.ADMIN_PANEL_TITLE, parse_mode="HTML", reply_markup=admin_panel_kb()
-    )
+    await answer_inline(message, t.ADMIN_PANEL_TITLE, admin_panel_kb(), parse_mode="HTML")
 
 
 async def _resolve(session: AsyncSession, raw: str) -> Profile | None:
@@ -139,15 +138,16 @@ async def _page(
         profiles = await repo.list_all(offset=offset, limit=_PAGE) if total else []
         empty = t.USERS_EMPTY
     if not profiles:
-        await message.answer(empty, reply_markup=admin_panel_kb())
+        await answer_inline(message, empty, admin_panel_kb())
         return
     start = offset + 1
     lines = [t.USERS_PAGE.format(start=start, end=offset + len(profiles), total=total), ""]
     for index, profile in enumerate(profiles, start=start):
         lines.append(_line(index, profile))
-    await message.answer(
+    await answer_inline(
+        message,
         "\n".join(lines),
-        reply_markup=_users_kb(profiles, offset=offset, total=total, action=action),
+        _users_kb(profiles, offset=offset, total=total, action=action),
     )
 
 
@@ -174,7 +174,7 @@ async def _ban(
 async def _ask(message: Message, state: FSMContext, *, action: str, prompt: str) -> None:
     await state.set_state(AdminPickUser.waiting)
     await state.update_data(admin_action=action)
-    await message.answer(prompt, reply_markup=admin_pick_kb())
+    await answer_inline(message, prompt, admin_pick_kb())
 
 
 async def _broadcast(bot: Bot, session: AsyncSession, text: str, message: Message) -> None:
@@ -214,7 +214,9 @@ def _guard(user_id: int, config: Config) -> bool:
 async def admin_cancel(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
     await state.clear()
     if callback.message and _guard(callback.from_user.id, config):
-        await callback.message.answer(t.ADMIN_PANEL_TITLE, parse_mode="HTML", reply_markup=admin_panel_kb())
+        await answer_inline(
+            callback.message, t.ADMIN_PANEL_TITLE, admin_panel_kb(), parse_mode="HTML"
+        )
     await callback.answer()
 
 
@@ -250,7 +252,7 @@ async def cb_ask(callback: CallbackQuery, state: FSMContext, config: Config) -> 
     }
     if action == "broadcast":
         await state.set_state(AdminBroadcast.waiting_text)
-        await callback.message.answer(prompts["broadcast"], reply_markup=admin_pick_kb())
+        await answer_inline(callback.message, prompts["broadcast"], admin_pick_kb())
         await callback.answer()
         return
     if action not in _ACTIONS:
@@ -395,7 +397,7 @@ async def cmd_broadcast(
     text = (command.args or "").strip()
     if not text:
         await state.set_state(AdminBroadcast.waiting_text)
-        await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
+        await answer_inline(message, t.ADMIN_BROADCAST_ASK, admin_pick_kb())
         return
     await _broadcast(bot, session, text, message)
 
@@ -405,7 +407,7 @@ async def btn_broadcast(message: Message, state: FSMContext, config: Config) -> 
     if not _guard(message.from_user.id, config):
         return
     await state.set_state(AdminBroadcast.waiting_text)
-    await message.answer(t.ADMIN_BROADCAST_ASK, reply_markup=admin_pick_kb())
+    await answer_inline(message, t.ADMIN_BROADCAST_ASK, admin_pick_kb())
 
 
 @router.message(AdminBroadcast.waiting_text, F.text)
@@ -491,7 +493,7 @@ async def pick_text(
     action = data.get("admin_action", "view")
     profile = await _resolve(session, message.text or "")
     if not profile or (action != "unban" and not profile.is_complete):
-        await message.answer(t.USER_NOT_FOUND, reply_markup=admin_pick_kb())
+        await answer_inline(message, t.USER_NOT_FOUND, admin_pick_kb())
         return
     await state.clear()
     await _apply_action(message, session, config, profile, action if action in _ACTIONS else "view")

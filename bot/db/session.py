@@ -36,12 +36,21 @@ def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
     return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
+def _add_feed_message_column(sync_conn) -> None:  # noqa: ANN001
+    """Старая база создана без этой колонки. create_all её не добавляет."""
+    rows = sync_conn.execute(text("PRAGMA table_info(profiles)")).fetchall()
+    if rows and "feed_message_id" not in {row[1] for row in rows}:
+        sync_conn.execute(text("ALTER TABLE profiles ADD COLUMN feed_message_id INTEGER"))
+
+
 async def init_db(engine: AsyncEngine) -> None:
     """Создаёт недостающие таблицы. Существующие строки не трогает и не удаляет."""
     async with engine.begin() as conn:
         if _is_sqlite(str(engine.url)):
             await conn.execute(text("PRAGMA foreign_keys=ON"))
         await conn.run_sync(Base.metadata.create_all)
+        if _is_sqlite(str(engine.url)):
+            await conn.run_sync(_add_feed_message_column)
 
 
 async def session_generator(

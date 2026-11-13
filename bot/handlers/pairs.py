@@ -9,6 +9,7 @@ from bot import texts as t
 from bot.config import Config
 from bot.db.repositories import MatchRepo
 from bot.keyboards.common import menu_for, pairs_kb
+from bot.live_buttons import arm
 from bot.services import require_profile
 
 
@@ -47,4 +48,5 @@ async def open_pairs(message: Message, session: AsyncSession, config: Config) ->
     )
     keyboard = pairs_kb(buttons)
     if keyboard:
-        await message.answer("Написать:", reply_markup=keyboard)
+        sent = await message.answer("Написать:", reply_markup=keyboard)
+        await arm(message.bot, sent.chat.id, sent.message_id)

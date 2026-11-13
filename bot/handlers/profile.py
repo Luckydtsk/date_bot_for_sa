@@ -12,15 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import texts as t
 from bot.config import Config
 from bot.db.repositories import ProfileRepo
-from bot.education import (
-    BACHELOR_PROGRAMS,
-    LEVEL_BACHELOR,
-    course_inline,
-    format_group,
-    group_inline,
-    level_inline,
-    programs_inline,
-)
+from bot.education import LEVEL_BACHELOR, LEVEL_MASTER
 from bot.handlers.register import begin
 from bot.keyboards.common import (
     confirm_kb,
@@ -33,6 +25,7 @@ from bot.keyboards.common import (
     my_profile_kb,
     remove_kb,
 )
+from bot.live_buttons import answer_inline, arm
 from bot.services import deliver_photo, opposite_gender, parse_height, require_profile
 from bot.states.profile import EditProfile
 
@@ -84,15 +77,19 @@ async def _refresh_card(bot: Bot, state: FSMContext, session: AsyncSession, user
             ),
             reply_markup=my_profile_kb(paused=not profile.is_active),
         )
+        await arm(bot, chat_id, message_id)
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc).lower():
-            await bot.send_photo(
+            sent = await bot.send_photo(
                 chat_id,
                 photo=profile.photo_file_id,
                 caption=t.my_profile_caption(profile),
                 parse_mode="HTML",
                 reply_markup=my_profile_kb(paused=not profile.is_active),
             )
+            await arm(bot, chat_id, sent.message_id)
+        else:
+            await arm(bot, chat_id, message_id)
 
 
 async def _set_card_markup(bot: Bot, state: FSMContext, markup: InlineKeyboardMarkup | None) -> None:
@@ -105,6 +102,8 @@ async def _set_card_markup(bot: Bot, state: FSMContext, markup: InlineKeyboardMa
         await bot.edit_message_reply_markup(
             chat_id=chat_id, message_id=message_id, reply_markup=markup
         )
+        if markup is not None:
+            await arm(bot, chat_id, message_id)
     except Exception:
         pass
 
@@ -118,7 +117,7 @@ def _prompt(title: str, body: str, current: str | None = None) -> str:
     lines = [f"<b>{html.escape(title)}</b>", html.escape(body)]
     if current:
         lines.append(f"Сейчас: {html.escape(current)}")
-    lines.append(f"{t.EDIT_KEEP} — под этим сообщением. /cancel — в меню.")
+    lines.append(f"{t.EDIT_KEEP} — под этим сообщением. Кнопка меню внизу — выйти.")
     return "\n".join(lines)
 
 
@@ -201,7 +200,7 @@ async def delete_ask(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
     if callback.message:
-        await callback.message.answer(t.CONFIRM_DELETE, reply_markup=confirm_kb("del"))
+        await answer_inline(callback.message, t.CONFIRM_DELETE, confirm_kb("del"))
     await callback.answer()
 
 
@@ -211,7 +210,7 @@ async def refill_ask(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
     if callback.message:
-        await callback.message.answer(t.CONFIRM_REFILL, reply_markup=confirm_kb("refill"))
+        await answer_inline(callback.message, t.CONFIRM_REFILL, confirm_kb("refill"))
     await callback.answer()
 
 
@@ -280,60 +279,64 @@ async def edit_pick(
         return
     if callback.message.photo:
         await _remember_card(state, callback.message)
-    await _set_card_markup(bot, state, keep_kb())
 
     if field == "name":
         await state.set_state(EditProfile.name)
-        await callback.message.answer(
+        await answer_inline(
+            callback.message,
             _prompt("Имя", t.EDIT_NAME, profile.name),
+            keep_kb(),
             parse_mode="HTML",
-            reply_markup=keep_kb(),
         )
     elif field == "about":
         await state.set_state(EditProfile.about)
-        await callback.message.answer(
+        await answer_inline(
+            callback.message,
             _prompt("О себе", t.EDIT_ABOUT, profile.about),
+            keep_kb(),
             parse_mode="HTML",
-            reply_markup=keep_kb(),
         )
     elif field == "photo":
         await state.set_state(EditProfile.photo)
-        await callback.message.answer(
+        await answer_inline(
+            callback.message,
             _prompt("Фото", t.EDIT_PHOTO),
+            keep_kb(),
             parse_mode="HTML",
-            reply_markup=keep_kb(),
         )
     elif field == "height":
         await state.set_state(EditProfile.height)
         current = f"{profile.height} см" if profile.height else "не указан"
-        await callback.message.answer(
+        await answer_inline(
+            callback.message,
             _prompt("Рост", t.EDIT_HEIGHT, current),
+            height_edit_kb(),
             parse_mode="HTML",
-            reply_markup=height_edit_kb(),
         )
     elif field == "gender":
         await state.set_state(EditProfile.gender)
-        await callback.message.answer(
+        await answer_inline(
+            callback.message,
             f"<b>{t.ASK_GENDER_TITLE}</b>\n{html.escape(t.ASK_GENDER_BODY)}",
+            gender_inline(),
             parse_mode="HTML",
-            reply_markup=gender_inline(),
         )
     elif field == "dance":
         await state.set_state(EditProfile.dance)
-        await callback.message.answer(
+        await answer_inline(
+            callback.message,
             f"<b>{t.ASK_DANCE_TITLE}</b>\n{html.escape(t.ASK_DANCE_BODY)}",
+            dance_inline(),
             parse_mode="HTML",
-            reply_markup=dance_inline(),
         )
     elif field == "faculty":
-        await state.set_state(EditProfile.edu_level)
-        sent = await callback.message.answer(
-            f"<b>{t.ASK_LEVEL_TITLE}</b>\n{html.escape(t.ASK_LEVEL_BODY)}\n\n"
-            f"{t.BTN_BACK} — не менять группу.",
+        await state.set_state(EditProfile.faculty)
+        await answer_inline(
+            callback.message,
+            _prompt("Направление, курс и группа", t.ASK_FACULTY_BODY, profile.faculty),
+            keep_kb(),
             parse_mode="HTML",
-            reply_markup=level_inline(),
         )
-        await state.update_data(wizard_chat_id=sent.chat.id, wizard_message_id=sent.message_id)
     else:
         await callback.answer(t.STALE_BUTTON, show_alert=True)
         return
@@ -409,147 +412,39 @@ async def set_dance(
     await callback.answer(t.EDIT_DONE)
 
 
-async def _wizard(bot: Bot, state: FSMContext, text: str, markup) -> None:
-    data = await state.get_data()
-    chat_id = data.get("wizard_chat_id")
-    message_id = data.get("wizard_message_id")
-    if not chat_id or not message_id:
-        return
-    try:
-        await bot.edit_message_text(
-            text=text,
-            chat_id=chat_id,
-            message_id=message_id,
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-    except TelegramBadRequest as exc:
-        if "message is not modified" not in str(exc).lower():
-            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
-
-
 @router.callback_query(F.data.startswith("edu:"))
-async def edit_edu(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
-) -> None:
-    if callback.message is None:
-        await callback.answer()
-        return
-    current = await state.get_state() or ""
-    if not current.startswith("EditProfile"):
-        await callback.answer(t.STALE_BUTTON, show_alert=True)
-        return
-    data_cb = callback.data or ""
-    profile = await _profile_for_edit(session, callback.from_user.id)
-    if not profile:
-        await callback.answer(t.NO_PROFILE, show_alert=True)
-        return
-
-    if data_cb == "edu:back":
-        if current == EditProfile.edu_program.state:
-            await state.set_state(EditProfile.edu_level)
-            await _wizard(
-                bot,
-                state,
-                f"<b>{t.ASK_LEVEL_TITLE}</b>\n{html.escape(t.ASK_LEVEL_BODY)}",
-                level_inline(),
-            )
-        elif current == EditProfile.edu_course.state:
-            await state.set_state(EditProfile.edu_program)
-            await _wizard(
-                bot,
-                state,
-                f"<b>{t.ASK_PROGRAM_TITLE}</b>\n{html.escape(t.ASK_PROGRAM_BODY)}",
-                programs_inline(),
-            )
-        elif current == EditProfile.edu_group.state:
-            await state.set_state(EditProfile.edu_course)
-            await _wizard(
-                bot,
-                state,
-                f"<b>{t.ASK_COURSE_TITLE}</b>\n{html.escape(t.ASK_COURSE_BODY)}",
-                course_inline(),
-            )
-        else:
-            await _show_fields(bot, state)
-            try:
-                await callback.message.edit_text("Группу не менял.", reply_markup=None)
-            except Exception:
-                pass
-        await callback.answer()
-        return
-
-    if data_cb == "edu:lvl:ma":
-        await callback.answer(t.MASTER_SOON, show_alert=True)
-        return
-    if data_cb == "edu:lvl:ba":
-        await state.update_data(edu_level=LEVEL_BACHELOR)
-        await state.set_state(EditProfile.edu_program)
-        await _wizard(
-            bot,
-            state,
-            f"<b>{t.ASK_PROGRAM_TITLE}</b>\n{html.escape(t.ASK_PROGRAM_BODY)}",
-            programs_inline(),
-        )
-        await callback.answer()
-        return
-    if data_cb.startswith("edu:prg:"):
-        program = data_cb.split(":", 2)[2]
-        if program not in BACHELOR_PROGRAMS:
-            await callback.answer(t.STALE_BUTTON, show_alert=True)
-            return
-        await state.update_data(edu_program=program)
-        await state.set_state(EditProfile.edu_course)
-        await _wizard(
-            bot,
-            state,
-            f"<b>{t.ASK_COURSE_TITLE}</b>\n{html.escape(t.ASK_COURSE_BODY)}",
-            course_inline(),
-        )
-        await callback.answer()
-        return
-    if data_cb.startswith("edu:crs:"):
-        raw = data_cb.rsplit(":", 1)[-1]
-        if raw not in {"1", "2", "3", "4"}:
-            await callback.answer()
-            return
-        await state.update_data(edu_course=int(raw))
-        await state.set_state(EditProfile.edu_group)
-        data = await state.get_data()
-        await _wizard(
-            bot,
-            state,
-            f"<b>{t.ASK_GROUP_TITLE}</b>\n{html.escape(t.ASK_GROUP_BODY)}",
-            group_inline(data["edu_program"], int(raw)),
-        )
-        await callback.answer()
-        return
-    if data_cb.startswith("edu:grp:"):
-        raw = data_cb.rsplit(":", 1)[-1]
-        if raw not in {"1", "2", "3", "4"}:
-            await callback.answer()
-            return
-        data = await state.get_data()
-        program = data.get("edu_program")
-        course = data.get("edu_course")
-        if not program or not course:
-            await callback.answer(t.STALE_BUTTON, show_alert=True)
-            return
-        faculty = format_group(program, int(course), int(raw))
-        await ProfileRepo(session).update_fields(profile, faculty=faculty)
-        await _refresh_card(bot, state, session, callback.from_user.id)
-        await state.clear()
+async def old_edu_buttons(callback: CallbackQuery) -> None:
+    if callback.message:
         try:
-            await callback.message.edit_text(
-                f"{t.EDIT_DONE} Группа: {html.escape(faculty)}",
-                parse_mode="HTML",
-                reply_markup=None,
-            )
+            await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-        await callback.answer(t.EDIT_DONE)
+    await callback.answer(t.STALE_BUTTON, show_alert=True)
+
+
+@router.message(EditProfile.faculty, F.text)
+async def edit_faculty(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    faculty = (message.text or "").strip()
+    if faculty in {t.BTN_BACK, t.EDIT_KEEP}:
+        await _show_fields(bot, state)
+        await message.answer("Не менял.")
         return
-    await callback.answer()
+    if faculty in t.RESERVED_INPUTS or faculty in {LEVEL_BACHELOR, LEVEL_MASTER}:
+        await message.answer(t.FACULTY_BAD)
+        return
+    if not faculty or len(faculty) > 100:
+        await message.answer(t.FACULTY_BAD)
+        return
+    profile = await _profile_for_edit(session, message.from_user.id)
+    if not profile:
+        await message.answer(t.NO_PROFILE)
+        return
+    await ProfileRepo(session).update_fields(profile, faculty=faculty)
+    await _refresh_card(bot, state, session, message.from_user.id)
+    await state.clear()
+    await message.answer(t.EDIT_DONE)
 
 
 @router.message(EditProfile.name, F.text)
@@ -616,7 +511,7 @@ async def edit_height(
     else:
         height = parse_height(raw)
         if height is None:
-            await message.answer(t.INVALID_HEIGHT, reply_markup=height_edit_kb())
+            await answer_inline(message, t.INVALID_HEIGHT, height_edit_kb())
             return
     profile = await _profile_for_edit(session, message.from_user.id)
     if not profile:
@@ -648,9 +543,9 @@ async def edit_photo_bad(message: Message, state: FSMContext, bot: Bot) -> None:
         await _show_fields(bot, state)
         await message.answer("Не менял.")
         return
-    await message.answer(t.NEED_PHOTO, reply_markup=keep_kb())
+    await answer_inline(message, t.NEED_PHOTO, keep_kb())
 
 
 @router.message(StateFilter(EditProfile))
 async def edit_unexpected(message: Message) -> None:
-    await message.answer("Нужна кнопка под сообщением или текст, который просили. /cancel — в меню.")
+    await message.answer("Нужна кнопка под сообщением или текст, который просили.")
