@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -49,9 +50,33 @@ def load_config() -> Config:
         os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./ball_bot.db")
     )
     redis_url = os.getenv("REDIS_URL", "").strip() or None
+    ensure_sqlite_parent(database_url)
     return Config(
         bot_token=token,
         admin_ids=frozenset(admin_ids),
         database_url=database_url,
         redis_url=redis_url,
     )
+
+
+def ensure_sqlite_parent(url: str) -> None:
+    """Папка файла SQLite создаётся заранее. Сам файл бот не удаляет."""
+    if not url.startswith("sqlite"):
+        return
+    raw = url.split("///", 1)[-1]
+    if not raw or raw == ":memory:":
+        return
+    path = Path(raw)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def safe_db_label(url: str) -> str:
+    """Путь к sqlite или хост postgres без пароля — для лога."""
+    if url.startswith("sqlite"):
+        return url.split("///", 1)[-1]
+    if "@" in url:
+        scheme, rest = url.split("://", 1)
+        return f"{scheme}://{rest.split('@', 1)[1]}"
+    return url.split("://", 1)[0]

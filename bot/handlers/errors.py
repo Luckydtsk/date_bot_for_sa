@@ -14,9 +14,7 @@ async def on_error(event: ErrorEvent, bot: Bot) -> None:
     try:
         if update.callback_query:
             try:
-                await update.callback_query.answer(
-                    "Что-то сломалось, попробуй ещё раз", show_alert=True
-                )
+                await update.callback_query.answer(t.ERROR_TRY_AGAIN, show_alert=True)
             except Exception:
                 pass
         elif update.message:

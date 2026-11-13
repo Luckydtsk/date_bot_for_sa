@@ -37,7 +37,7 @@ def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
 
 
 async def init_db(engine: AsyncEngine) -> None:
-    """Создаёт таблицы, если их ещё нет (схема описана в models.py)."""
+    """Создаёт недостающие таблицы. Существующие строки не трогает и не удаляет."""
     async with engine.begin() as conn:
         if _is_sqlite(str(engine.url)):
             await conn.execute(text("PRAGMA foreign_keys=ON"))

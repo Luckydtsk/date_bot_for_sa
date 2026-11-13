@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram bot for the student ball
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ball-bot
+EnvironmentFile=/opt/ball-bot/.env
+ExecStart=/opt/ball-bot/.venv/bin/python -m bot.main
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

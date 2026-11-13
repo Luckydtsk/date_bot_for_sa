@@ -1,8 +1,12 @@
+"""Своя анкета: правки не прячут меню внизу."""
+
+import html
+
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import default_state
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardMarkup
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts as t
@@ -11,706 +15,642 @@ from bot.db.repositories import ProfileRepo
 from bot.education import (
     BACHELOR_PROGRAMS,
     LEVEL_BACHELOR,
-    LEVEL_MASTER,
-    bachelor_programs_kb,
-    course_kb,
+    course_inline,
     format_group,
-    group_kb,
-    level_kb,
+    group_inline,
+    level_inline,
+    programs_inline,
 )
-from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
+from bot.handlers.register import begin
 from bot.keyboards.common import (
-    edit_back_ikb,
-    edit_dance_ikb,
+    confirm_kb,
+    dance_inline,
     edit_fields_kb,
-    edit_gender_ikb,
-    edit_height_ikb,
-    is_admin,
+    gender_inline,
+    height_edit_kb,
+    keep_kb,
     menu_for,
     my_profile_kb,
     remove_kb,
-    with_main_menu,
-    yes_no_kb,
 )
-from bot.services import DANCE_MAP, GENDER_MAP, opposite_gender, require_profile, send_profile_card
-from bot.states.profile import EditProfile, Registration
+from bot.services import deliver_photo, opposite_gender, parse_height, require_profile
+from bot.states.profile import EditProfile
 
 router = Router(name="profile")
 
 
-def _edit_kb(base: ReplyKeyboardMarkup, user_id: int, config: Config) -> ReplyKeyboardMarkup:
-    return with_main_menu(base, is_admin=is_admin(user_id, config))
-
-
-async def _show_my_profile(message: Message, session: AsyncSession, state: FSMContext) -> None:
+async def open_my_profile(message: Message, session: AsyncSession, config: Config) -> None:
     profile = await require_profile(session, message.from_user.id)
     if not profile:
-        await message.answer(t.NO_PROFILE)
+        await message.answer(t.NO_PROFILE, reply_markup=menu_for(message.from_user.id, config))
         return
-    sent = await send_profile_card(
-        message,
-        profile,
-        prefix=f"{t.MY_PROFILE_HEADER}\n\n",
-        reply_markup=my_profile_kb(is_paused=not profile.is_active),
-    )
-    await track_keyboard_message(state, sent)
-    if not profile.is_active:
-        await message.answer(t.PROFILE_PAUSED)
-
-
-async def _show_edit_chooser(
-    message: Message, state: FSMContext, config: Config
-) -> None:
-    """Список полей + возврат нижнего меню (на случай клавиатуры поля)."""
-    await state.set_state(EditProfile.choose_field)
     await message.answer(
-        t.CHOOSE_FIELD, reply_markup=menu_for(message.from_user.id, config)
+        "Так тебя видят другие. Под фото можно изменить, скрыть или удалить.",
+        reply_markup=menu_for(message.from_user.id, config),
     )
-    sent = await message.answer("Выбери поле:", reply_markup=edit_fields_kb())
-    await track_keyboard_message(state, sent)
+    await deliver_photo(
+        message,
+        profile.photo_file_id,
+        t.my_profile_caption(profile),
+        my_profile_kb(paused=not profile.is_active),
+    )
 
 
-async def _back_to_edit_chooser(
-    message: Message, state: FSMContext, config: Config
-) -> None:
-    await _show_edit_chooser(message, state, config)
+async def _profile_for_edit(session: AsyncSession, user_id: int):
+    return await require_profile(session, user_id)
 
 
-@router.message(StateFilter(default_state), F.text == t.BTN_MY_PROFILE)
-async def my_profile(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await _show_my_profile(message, session, state)
+async def _remember_card(state: FSMContext, message: Message) -> None:
+    await state.update_data(card_chat_id=message.chat.id, card_message_id=message.message_id)
 
 
-@router.callback_query(F.data == "profile:menu")
-async def back_menu(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    if not callback.message:
+async def _refresh_card(bot: Bot, state: FSMContext, session: AsyncSession, user_id: int) -> None:
+    profile = await _profile_for_edit(session, user_id)
+    data = await state.get_data()
+    chat_id = data.get("card_chat_id")
+    message_id = data.get("card_message_id")
+    if profile is None or not chat_id or not message_id:
+        return
+    from aiogram.types import InputMediaPhoto
+
+    try:
+        await bot.edit_message_media(
+            chat_id=chat_id,
+            message_id=message_id,
+            media=InputMediaPhoto(
+                media=profile.photo_file_id,
+                caption=t.my_profile_caption(profile),
+                parse_mode="HTML",
+            ),
+            reply_markup=my_profile_kb(paused=not profile.is_active),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            await bot.send_photo(
+                chat_id,
+                photo=profile.photo_file_id,
+                caption=t.my_profile_caption(profile),
+                parse_mode="HTML",
+                reply_markup=my_profile_kb(paused=not profile.is_active),
+            )
+
+
+async def _set_card_markup(bot: Bot, state: FSMContext, markup: InlineKeyboardMarkup | None) -> None:
+    data = await state.get_data()
+    chat_id = data.get("card_chat_id")
+    message_id = data.get("card_message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        await bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=markup
+        )
+    except Exception:
+        pass
+
+
+async def _show_fields(bot: Bot, state: FSMContext) -> None:
+    await state.set_state(EditProfile.choose_field)
+    await _set_card_markup(bot, state, edit_fields_kb())
+
+
+def _prompt(title: str, body: str, current: str | None = None) -> str:
+    lines = [f"<b>{html.escape(title)}</b>", html.escape(body)]
+    if current:
+        lines.append(f"Сейчас: {html.escape(current)}")
+    lines.append(f"{t.EDIT_KEEP} — под этим сообщением. /cancel — в меню.")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "profile:edit")
+async def edit_menu(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
+    if callback.message is None:
         await callback.answer()
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await state.clear()
-    await callback.message.answer(
-        t.MENU_TITLE, reply_markup=menu_for(callback.from_user.id, config)
-    )
+    if not await _profile_for_edit(session, callback.from_user.id):
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    await _remember_card(state, callback.message)
+    await _show_fields(bot, state)
+    await callback.answer(t.CHOOSE_FIELD)
+
+
+@router.callback_query(F.data == "edit:back")
+async def edit_back(callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    current = await state.get_state()
+    if current in {None, EditProfile.choose_field.state}:
+        profile = await _profile_for_edit(session, callback.from_user.id)
+        if profile and callback.message.photo:
+            try:
+                await callback.message.edit_reply_markup(
+                    reply_markup=my_profile_kb(paused=not profile.is_active)
+                )
+            except Exception:
+                pass
+        elif profile:
+            await _set_card_markup(bot, state, my_profile_kb(paused=not profile.is_active))
+        await state.clear()
+        await callback.answer()
+        return
+
+    await _show_fields(bot, state)
+    if callback.message.photo:
+        await callback.answer("Не менял")
+        return
+    try:
+        await callback.message.edit_text("Не менял.", reply_markup=None)
+    except Exception:
+        pass
     await callback.answer()
 
 
 @router.callback_query(F.data == "profile:pause")
-async def pause_profile(
-    callback: CallbackQuery,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    repo = ProfileRepo(session)
-    profile = await repo.get_by_tg(callback.from_user.id)
-    if not profile:
-        await callback.answer(t.NO_PROFILE, show_alert=True)
-        return
-    await repo.set_paused(profile, True)
-    await callback.message.answer(
-        t.PROFILE_PAUSED, reply_markup=menu_for(callback.from_user.id, config)
-    )
-    await callback.answer()
-
-
 @router.callback_query(F.data == "profile:unpause")
-async def unpause_profile(
-    callback: CallbackQuery,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+async def toggle_pause(
+    callback: CallbackQuery, session: AsyncSession, config: Config
 ) -> None:
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
+    if callback.message is None:
+        await callback.answer()
+        return
     repo = ProfileRepo(session)
-    profile = await repo.get_by_tg(callback.from_user.id)
+    profile = await _profile_for_edit(session, callback.from_user.id)
     if not profile:
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
-    await repo.set_paused(profile, False)
+    paused = callback.data == "profile:pause"
+    await repo.set_paused(profile, paused)
+    caption = t.my_profile_caption(profile)
+    markup = my_profile_kb(paused=paused)
+    try:
+        await callback.message.edit_caption(caption=caption, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        await deliver_photo(callback.message, profile.photo_file_id, caption, markup)
     await callback.message.answer(
-        t.PROFILE_ACTIVE, reply_markup=menu_for(callback.from_user.id, config)
+        t.PROFILE_PAUSED if paused else t.PROFILE_ACTIVE,
+        reply_markup=menu_for(callback.from_user.id, config),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "profile:delete")
-async def delete_ask(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await state.set_state(EditProfile.confirm_delete)
-    await callback.message.answer(
-        t.CONFIRM_DELETE,
-        reply_markup=_edit_kb(yes_no_kb(), callback.from_user.id, config),
-    )
+async def delete_ask(callback: CallbackQuery, session: AsyncSession) -> None:
+    if not await _profile_for_edit(session, callback.from_user.id):
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    if callback.message:
+        await callback.message.answer(t.CONFIRM_DELETE, reply_markup=confirm_kb("del"))
     await callback.answer()
-
-
-@router.message(EditProfile.confirm_delete, F.text == t.YES)
-async def delete_yes(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    repo = ProfileRepo(session)
-    profile = await repo.get_by_tg(message.from_user.id)
-    if profile:
-        await repo.delete(profile)
-    await state.clear()
-    await message.answer(t.PROFILE_DELETED)
-
-
-@router.message(EditProfile.confirm_delete, F.text == t.NO)
-async def delete_no(
-    message: Message, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await message.answer(
-        t.MENU_TITLE, reply_markup=menu_for(message.from_user.id, config)
-    )
 
 
 @router.callback_query(F.data == "profile:refill")
-async def refill_ask(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await state.set_state(EditProfile.confirm_refill)
-    await callback.message.answer(
-        t.CONFIRM_REFILL,
-        reply_markup=_edit_kb(yes_no_kb(), callback.from_user.id, config),
-    )
+async def refill_ask(callback: CallbackQuery, session: AsyncSession) -> None:
+    if not await _profile_for_edit(session, callback.from_user.id):
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    if callback.message:
+        await callback.message.answer(t.CONFIRM_REFILL, reply_markup=confirm_kb("refill"))
     await callback.answer()
 
 
-@router.message(EditProfile.confirm_refill, F.text == t.YES)
-async def refill_yes(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+@router.callback_query(F.data == "ask:del:no")
+@router.callback_query(F.data == "ask:refill:no")
+async def ask_no(callback: CallbackQuery) -> None:
+    if callback.message:
+        try:
+            await callback.message.edit_text("Ок, анкета на месте.", reply_markup=None)
+        except Exception:
+            pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ask:del:yes")
+async def delete_yes(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    profile = await ProfileRepo(session).get_by_tg(message.from_user.id)
+    repo = ProfileRepo(session)
+    profile = await repo.get_by_tg(callback.from_user.id)
     if profile:
-        # Скрываем из каталога; лайки/матчи сбросим только после успешного финиша
-        await ProfileRepo(session).begin_refill(profile)
+        await repo.delete(profile)
     await state.clear()
-    await message.answer(t.ASK_NAME, reply_markup=remove_kb())
-    await state.set_state(Registration.name)
-
-
-@router.message(EditProfile.confirm_refill, F.text == t.NO)
-async def refill_no(
-    message: Message, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await message.answer(
-        t.MENU_TITLE, reply_markup=menu_for(message.from_user.id, config)
-    )
-
-
-@router.callback_query(F.data == "profile:edit")
-async def edit_menu(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await _show_edit_chooser(callback.message, state, config)
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await callback.message.answer(t.PROFILE_DELETED, reply_markup=remove_kb())
     await callback.answer()
 
 
-@router.message(StateFilter(EditProfile), F.text == t.BTN_BROWSE)
-async def edit_abort_browse(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+@router.callback_query(F.data == "ask:refill:yes")
+async def refill_yes(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    from bot.handlers.feed import start_browse
-
-    await start_browse(message, state, session, bot, config)
-
-
-@router.message(StateFilter(EditProfile), F.text == t.BTN_MY_PROFILE)
-async def edit_abort_my_profile(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await _show_my_profile(message, session, state)
-
-
-@router.message(StateFilter(EditProfile), F.text == t.BTN_LIKES_ME)
-async def edit_abort_likes_me(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    from bot.handlers.likes import start_likes_me
-
-    await start_likes_me(message, state, session, bot, config)
-
-
-@router.message(StateFilter(EditProfile), F.text == t.BTN_ADMIN)
-async def edit_abort_admin(
-    message: Message, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    from bot.handlers.admin import open_admin_panel
-
-    await open_admin_panel(message, state, bot, config)
-
-
-@router.callback_query(EditProfile.choose_field, F.data.startswith("edit:"))
-async def edit_field_pick(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    if not callback.message:
+    if callback.message is None:
         await callback.answer()
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    field = callback.data.split(":", 1)[1]
+    profile = await ProfileRepo(session).get_by_tg(callback.from_user.id)
+    if profile:
+        await ProfileRepo(session).begin_refill(profile)
+    await state.clear()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.answer()
+    await begin(callback.message, state, refill=True)
+
+
+@router.callback_query(F.data.startswith("edit:"), ~F.data.in_({"edit:back", "edit:height:clear"}))
+async def edit_pick(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    field = (callback.data or "").split(":", 1)[1]
     if field == "back":
         await callback.answer()
         return
-    uid = callback.from_user.id
-    mapping: dict = {
-        "name": (EditProfile.name, t.ASK_NAME, edit_back_ikb()),
-        "gender": (EditProfile.gender, t.ASK_GENDER, edit_gender_ikb()),
-        "faculty": (
-            EditProfile.edu_level,
-            t.ASK_EDU_LEVEL,
-            _edit_kb(level_kb(), uid, config),
-        ),
-        "height": (EditProfile.height, t.ASK_HEIGHT, edit_height_ikb()),
-        "dance": (EditProfile.dance, t.ASK_DANCE, edit_dance_ikb()),
-        "about": (EditProfile.about, t.ASK_ABOUT, edit_back_ikb()),
-        "photo": (EditProfile.photo, t.ASK_PHOTO, edit_back_ikb()),
-    }
-    if field not in mapping:
-        await callback.answer()
+    profile = await _profile_for_edit(session, callback.from_user.id)
+    if not profile:
+        await callback.answer(t.NO_PROFILE, show_alert=True)
         return
-    st, text, kb = mapping[field]
-    await state.set_state(st)
-    sent = await callback.message.answer(text, reply_markup=kb)
-    await track_keyboard_message(state, sent)
+    if callback.message.photo:
+        await _remember_card(state, callback.message)
+    await _set_card_markup(bot, state, keep_kb())
+
+    if field == "name":
+        await state.set_state(EditProfile.name)
+        await callback.message.answer(
+            _prompt("Имя", t.EDIT_NAME, profile.name),
+            parse_mode="HTML",
+            reply_markup=keep_kb(),
+        )
+    elif field == "about":
+        await state.set_state(EditProfile.about)
+        await callback.message.answer(
+            _prompt("О себе", t.EDIT_ABOUT, profile.about),
+            parse_mode="HTML",
+            reply_markup=keep_kb(),
+        )
+    elif field == "photo":
+        await state.set_state(EditProfile.photo)
+        await callback.message.answer(
+            _prompt("Фото", t.EDIT_PHOTO),
+            parse_mode="HTML",
+            reply_markup=keep_kb(),
+        )
+    elif field == "height":
+        await state.set_state(EditProfile.height)
+        current = f"{profile.height} см" if profile.height else "не указан"
+        await callback.message.answer(
+            _prompt("Рост", t.EDIT_HEIGHT, current),
+            parse_mode="HTML",
+            reply_markup=height_edit_kb(),
+        )
+    elif field == "gender":
+        await state.set_state(EditProfile.gender)
+        await callback.message.answer(
+            f"<b>{t.ASK_GENDER_TITLE}</b>\n{html.escape(t.ASK_GENDER_BODY)}",
+            parse_mode="HTML",
+            reply_markup=gender_inline(),
+        )
+    elif field == "dance":
+        await state.set_state(EditProfile.dance)
+        await callback.message.answer(
+            f"<b>{t.ASK_DANCE_TITLE}</b>\n{html.escape(t.ASK_DANCE_BODY)}",
+            parse_mode="HTML",
+            reply_markup=dance_inline(),
+        )
+    elif field == "faculty":
+        await state.set_state(EditProfile.edu_level)
+        sent = await callback.message.answer(
+            f"<b>{t.ASK_LEVEL_TITLE}</b>\n{html.escape(t.ASK_LEVEL_BODY)}\n\n"
+            f"{t.BTN_BACK} — не менять группу.",
+            parse_mode="HTML",
+            reply_markup=level_inline(),
+        )
+        await state.update_data(wizard_chat_id=sent.chat.id, wizard_message_id=sent.message_id)
+    else:
+        await callback.answer(t.STALE_BUTTON, show_alert=True)
+        return
     await callback.answer()
 
 
-@router.callback_query(StateFilter(EditProfile), F.data == "edit:back")
-async def edit_back_to_chooser(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
+async def _done(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, user_id: int
 ) -> None:
-    if not callback.message:
-        await callback.answer()
+    await _refresh_card(bot, state, session, user_id)
+    await state.clear()
+    try:
+        await message.edit_text(t.EDIT_DONE, reply_markup=None)
+    except Exception:
+        await message.answer(t.EDIT_DONE)
+
+
+@router.callback_query(F.data == "edit:height:clear")
+async def clear_height(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    if await state.get_state() != EditProfile.height.state:
+        await callback.answer(t.STALE_BUTTON, show_alert=True)
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await _show_edit_chooser(callback.message, state, config)
-    await callback.answer()
+    profile = await _profile_for_edit(session, callback.from_user.id)
+    if not profile or callback.message is None:
+        await callback.answer(t.NO_PROFILE, show_alert=True)
+        return
+    await ProfileRepo(session).update_fields(profile, height=None)
+    await _done(callback.message, state, session, bot, callback.from_user.id)
+    await callback.answer(t.EDIT_DONE)
 
 
-@router.callback_query(EditProfile.gender, F.data.startswith("editset:gender:"))
-async def edit_gender_cb(
-    callback: CallbackQuery,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+@router.callback_query(F.data.startswith("set:gender:"))
+async def set_gender(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    gender = callback.data.split(":")[-1]
+    if await state.get_state() != EditProfile.gender.state or callback.message is None:
+        await callback.answer(t.STALE_BUTTON, show_alert=True)
+        return
+    gender = (callback.data or "").rsplit(":", 1)[-1]
     if gender not in {"male", "female"}:
         await callback.answer()
         return
-    profile = await require_profile(session, callback.from_user.id)
+    profile = await _profile_for_edit(session, callback.from_user.id)
     if not profile:
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
     await ProfileRepo(session).update_fields(
-        profile,
-        gender=gender,
-        looking_for=opposite_gender(gender),
+        profile, gender=gender, looking_for=opposite_gender(gender)
     )
-    await callback.answer()
-    await _after_edit(callback.message, state, session, bot, config)
+    await _done(callback.message, state, session, bot, callback.from_user.id)
+    await callback.answer(t.EDIT_DONE)
 
 
-@router.callback_query(EditProfile.dance, F.data.startswith("editset:dance:"))
-async def edit_dance_cb(
-    callback: CallbackQuery,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+@router.callback_query(F.data.startswith("set:dance:"))
+async def set_dance(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    dance = callback.data.split(":")[-1]
+    if await state.get_state() != EditProfile.dance.state or callback.message is None:
+        await callback.answer(t.STALE_BUTTON, show_alert=True)
+        return
+    dance = (callback.data or "").rsplit(":", 1)[-1]
     if dance not in {"none", "some", "confident"}:
         await callback.answer()
         return
-    profile = await require_profile(session, callback.from_user.id)
+    profile = await _profile_for_edit(session, callback.from_user.id)
     if not profile:
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
     await ProfileRepo(session).update_fields(profile, dance_experience=dance)
-    await callback.answer()
-    await _after_edit(callback.message, state, session, bot, config)
+    await _done(callback.message, state, session, bot, callback.from_user.id)
+    await callback.answer(t.EDIT_DONE)
 
 
-@router.callback_query(EditProfile.height, F.data == "editset:height:skip")
-async def edit_height_skip_cb(
-    callback: CallbackQuery,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+async def _wizard(bot: Bot, state: FSMContext, text: str, markup) -> None:
+    data = await state.get_data()
+    chat_id = data.get("wizard_chat_id")
+    message_id = data.get("wizard_message_id")
+    if not chat_id or not message_id:
+        return
+    try:
+        await bot.edit_message_text(
+            text=text,
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode="HTML",
+            reply_markup=markup,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("edu:"))
+async def edit_edu(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    profile = await require_profile(session, callback.from_user.id)
+    if callback.message is None:
+        await callback.answer()
+        return
+    current = await state.get_state() or ""
+    if not current.startswith("EditProfile"):
+        await callback.answer(t.STALE_BUTTON, show_alert=True)
+        return
+    data_cb = callback.data or ""
+    profile = await _profile_for_edit(session, callback.from_user.id)
     if not profile:
         await callback.answer(t.NO_PROFILE, show_alert=True)
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await ProfileRepo(session).update_fields(profile, height=None)
+
+    if data_cb == "edu:back":
+        if current == EditProfile.edu_program.state:
+            await state.set_state(EditProfile.edu_level)
+            await _wizard(
+                bot,
+                state,
+                f"<b>{t.ASK_LEVEL_TITLE}</b>\n{html.escape(t.ASK_LEVEL_BODY)}",
+                level_inline(),
+            )
+        elif current == EditProfile.edu_course.state:
+            await state.set_state(EditProfile.edu_program)
+            await _wizard(
+                bot,
+                state,
+                f"<b>{t.ASK_PROGRAM_TITLE}</b>\n{html.escape(t.ASK_PROGRAM_BODY)}",
+                programs_inline(),
+            )
+        elif current == EditProfile.edu_group.state:
+            await state.set_state(EditProfile.edu_course)
+            await _wizard(
+                bot,
+                state,
+                f"<b>{t.ASK_COURSE_TITLE}</b>\n{html.escape(t.ASK_COURSE_BODY)}",
+                course_inline(),
+            )
+        else:
+            await _show_fields(bot, state)
+            try:
+                await callback.message.edit_text("Группу не менял.", reply_markup=None)
+            except Exception:
+                pass
+        await callback.answer()
+        return
+
+    if data_cb == "edu:lvl:ma":
+        await callback.answer(t.MASTER_SOON, show_alert=True)
+        return
+    if data_cb == "edu:lvl:ba":
+        await state.update_data(edu_level=LEVEL_BACHELOR)
+        await state.set_state(EditProfile.edu_program)
+        await _wizard(
+            bot,
+            state,
+            f"<b>{t.ASK_PROGRAM_TITLE}</b>\n{html.escape(t.ASK_PROGRAM_BODY)}",
+            programs_inline(),
+        )
+        await callback.answer()
+        return
+    if data_cb.startswith("edu:prg:"):
+        program = data_cb.split(":", 2)[2]
+        if program not in BACHELOR_PROGRAMS:
+            await callback.answer(t.STALE_BUTTON, show_alert=True)
+            return
+        await state.update_data(edu_program=program)
+        await state.set_state(EditProfile.edu_course)
+        await _wizard(
+            bot,
+            state,
+            f"<b>{t.ASK_COURSE_TITLE}</b>\n{html.escape(t.ASK_COURSE_BODY)}",
+            course_inline(),
+        )
+        await callback.answer()
+        return
+    if data_cb.startswith("edu:crs:"):
+        raw = data_cb.rsplit(":", 1)[-1]
+        if raw not in {"1", "2", "3", "4"}:
+            await callback.answer()
+            return
+        await state.update_data(edu_course=int(raw))
+        await state.set_state(EditProfile.edu_group)
+        data = await state.get_data()
+        await _wizard(
+            bot,
+            state,
+            f"<b>{t.ASK_GROUP_TITLE}</b>\n{html.escape(t.ASK_GROUP_BODY)}",
+            group_inline(data["edu_program"], int(raw)),
+        )
+        await callback.answer()
+        return
+    if data_cb.startswith("edu:grp:"):
+        raw = data_cb.rsplit(":", 1)[-1]
+        if raw not in {"1", "2", "3", "4"}:
+            await callback.answer()
+            return
+        data = await state.get_data()
+        program = data.get("edu_program")
+        course = data.get("edu_course")
+        if not program or not course:
+            await callback.answer(t.STALE_BUTTON, show_alert=True)
+            return
+        faculty = format_group(program, int(course), int(raw))
+        await ProfileRepo(session).update_fields(profile, faculty=faculty)
+        await _refresh_card(bot, state, session, callback.from_user.id)
+        await state.clear()
+        try:
+            await callback.message.edit_text(
+                f"{t.EDIT_DONE} Группа: {html.escape(faculty)}",
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except Exception:
+            pass
+        await callback.answer(t.EDIT_DONE)
+        return
     await callback.answer()
-    await _after_edit(callback.message, state, session, bot, config)
-
-
-async def _after_edit(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await message.answer(
-        t.EDIT_DONE, reply_markup=menu_for(message.from_user.id, config)
-    )
-    await _show_my_profile(message, session, state)
 
 
 @router.message(EditProfile.name, F.text)
 async def edit_name(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    if message.text == t.CANCEL:
-        await _back_to_edit_chooser(message, state, config)
-        return
     name = (message.text or "").strip()
-    if not (1 <= len(name) <= 50):
-        await message.answer(
-            t.NAME_TOO_LONG if len(name) > 50 else t.NEED_TEXT,
-            reply_markup=edit_back_ikb(),
-        )
+    if name in {t.BTN_BACK, t.EDIT_KEEP}:
+        await _show_fields(bot, state)
+        await message.answer("Не менял.")
         return
-    profile = await require_profile(session, message.from_user.id)
+    if name in t.RESERVED_INPUTS:
+        await message.answer(t.NAME_IS_BUTTON)
+        return
+    if not name or len(name) > 50:
+        await message.answer(t.NAME_TOO_LONG if len(name) > 50 else t.NAME_EMPTY)
+        return
+    profile = await _profile_for_edit(session, message.from_user.id)
     if not profile:
         await message.answer(t.NO_PROFILE)
         return
     await ProfileRepo(session).update_fields(profile, name=name)
-    await _after_edit(message, state, session, bot, config)
-
-
-@router.message(EditProfile.gender, F.text)
-async def edit_gender(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    if message.text == t.CANCEL:
-        await _back_to_edit_chooser(message, state, config)
-        return
-    gender = GENDER_MAP.get(message.text or "")
-    if not gender:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=edit_gender_ikb())
-        return
-    profile = await require_profile(session, message.from_user.id)
-    if not profile:
-        await message.answer(t.NO_PROFILE)
-        return
-    await ProfileRepo(session).update_fields(
-        profile,
-        gender=gender,
-        looking_for=opposite_gender(gender),
-    )
-    await _after_edit(message, state, session, bot, config)
-
-
-@router.message(EditProfile.edu_level, F.text)
-async def edit_edu_level(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    uid = message.from_user.id
-    if message.text == t.CANCEL:
-        await _back_to_edit_chooser(message, state, config)
-        return
-    if message.text == LEVEL_MASTER:
-        await message.answer(
-            t.MASTER_SOON, reply_markup=_edit_kb(level_kb(), uid, config)
-        )
-        return
-    if message.text != LEVEL_BACHELOR:
-        await message.answer(
-            t.FSM_USE_BUTTONS, reply_markup=_edit_kb(level_kb(), uid, config)
-        )
-        return
-    await state.update_data(edu_level=LEVEL_BACHELOR)
-    await message.answer(
-        t.ASK_EDU_PROGRAM,
-        reply_markup=_edit_kb(bachelor_programs_kb(), uid, config),
-    )
-    await state.set_state(EditProfile.edu_program)
-
-
-@router.message(EditProfile.edu_program, F.text)
-async def edit_edu_program(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    uid = message.from_user.id
-    if message.text == t.CANCEL:
-        await message.answer(
-            t.ASK_EDU_LEVEL, reply_markup=_edit_kb(level_kb(), uid, config)
-        )
-        await state.set_state(EditProfile.edu_level)
-        return
-    program = (message.text or "").strip()
-    if program not in BACHELOR_PROGRAMS:
-        await message.answer(
-            t.FSM_USE_BUTTONS,
-            reply_markup=_edit_kb(bachelor_programs_kb(), uid, config),
-        )
-        return
-    await state.update_data(edu_program=program)
-    await message.answer(
-        t.ASK_EDU_COURSE, reply_markup=_edit_kb(course_kb(), uid, config)
-    )
-    await state.set_state(EditProfile.edu_course)
-
-
-@router.message(EditProfile.edu_course, F.text)
-async def edit_edu_course(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    uid = message.from_user.id
-    if message.text == t.CANCEL:
-        await message.answer(
-            t.ASK_EDU_PROGRAM,
-            reply_markup=_edit_kb(bachelor_programs_kb(), uid, config),
-        )
-        await state.set_state(EditProfile.edu_program)
-        return
-    raw = (message.text or "").strip()
-    if raw not in {"1", "2", "3", "4"}:
-        await message.answer(
-            t.FSM_USE_BUTTONS, reply_markup=_edit_kb(course_kb(), uid, config)
-        )
-        return
-    await state.update_data(edu_course=int(raw))
-    data = await state.get_data()
-    program = data["edu_program"]
-    await message.answer(
-        t.ASK_EDU_GROUP,
-        reply_markup=_edit_kb(group_kb(program, int(raw)), uid, config),
-    )
-    await state.set_state(EditProfile.edu_group)
-
-
-@router.message(EditProfile.edu_group, F.text)
-async def edit_edu_group(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    uid = message.from_user.id
-    data = await state.get_data()
-    program = data.get("edu_program")
-    course = data.get("edu_course")
-    if message.text == t.CANCEL:
-        await message.answer(
-            t.ASK_EDU_COURSE, reply_markup=_edit_kb(course_kb(), uid, config)
-        )
-        await state.set_state(EditProfile.edu_course)
-        return
-    if not program or not course:
-        await message.answer(
-            t.ASK_EDU_LEVEL, reply_markup=_edit_kb(level_kb(), uid, config)
-        )
-        await state.set_state(EditProfile.edu_level)
-        return
-    allowed = {format_group(program, int(course), s) for s in (1, 2, 3, 4)}
-    group = (message.text or "").strip()
-    if group not in allowed:
-        await message.answer(
-            t.FSM_USE_BUTTONS,
-            reply_markup=_edit_kb(group_kb(program, int(course)), uid, config),
-        )
-        return
-    profile = await require_profile(session, message.from_user.id)
-    if not profile:
-        await message.answer(t.NO_PROFILE)
-        return
-    await ProfileRepo(session).update_fields(profile, faculty=group)
-    await _after_edit(message, state, session, bot, config)
-
-
-@router.message(EditProfile.height, F.text)
-async def edit_height(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    if message.text == t.CANCEL:
-        await _back_to_edit_chooser(message, state, config)
-        return
-    height = None
-    if message.text != t.SKIP:
-        raw = (message.text or "").strip().replace("см", "").strip()
-        if not raw.isdigit() or not (100 <= int(raw) <= 250):
-            await message.answer(t.INVALID_HEIGHT, reply_markup=edit_height_ikb())
-            return
-        height = int(raw)
-    profile = await require_profile(session, message.from_user.id)
-    if not profile:
-        await message.answer(t.NO_PROFILE)
-        return
-    await ProfileRepo(session).update_fields(profile, height=height)
-    await _after_edit(message, state, session, bot, config)
-
-
-@router.message(EditProfile.dance, F.text)
-async def edit_dance(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
-) -> None:
-    if message.text == t.CANCEL:
-        await _back_to_edit_chooser(message, state, config)
-        return
-    dance = DANCE_MAP.get(message.text or "")
-    if not dance:
-        await message.answer(t.FSM_USE_BUTTONS, reply_markup=edit_dance_ikb())
-        return
-    profile = await require_profile(session, message.from_user.id)
-    if not profile:
-        await message.answer(t.NO_PROFILE)
-        return
-    await ProfileRepo(session).update_fields(profile, dance_experience=dance)
-    await _after_edit(message, state, session, bot, config)
+    await _refresh_card(bot, state, session, message.from_user.id)
+    await state.clear()
+    await message.answer(t.EDIT_DONE)
 
 
 @router.message(EditProfile.about, F.text)
 async def edit_about(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    if message.text == t.CANCEL:
-        await _back_to_edit_chooser(message, state, config)
-        return
     about = (message.text or "").strip()
+    if about in {t.BTN_BACK, t.EDIT_KEEP}:
+        await _show_fields(bot, state)
+        await message.answer("Не менял.")
+        return
     if len(about) < 5:
-        await message.answer(t.ABOUT_TOO_SHORT, reply_markup=edit_back_ikb())
+        await message.answer(t.ABOUT_TOO_SHORT)
         return
     if len(about) > 400:
-        await message.answer(t.ABOUT_TOO_LONG, reply_markup=edit_back_ikb())
+        await message.answer(t.ABOUT_TOO_LONG)
         return
-    profile = await require_profile(session, message.from_user.id)
+    profile = await _profile_for_edit(session, message.from_user.id)
     if not profile:
         await message.answer(t.NO_PROFILE)
         return
     await ProfileRepo(session).update_fields(profile, about=about)
-    await _after_edit(message, state, session, bot, config)
+    await _refresh_card(bot, state, session, message.from_user.id)
+    await state.clear()
+    await message.answer(t.EDIT_DONE)
+
+
+@router.message(EditProfile.height, F.text)
+async def edit_height(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    raw = (message.text or "").strip()
+    if raw in {t.BTN_BACK, t.EDIT_KEEP}:
+        await _show_fields(bot, state)
+        await message.answer("Не менял.")
+        return
+    if raw in {t.EDIT_CLEAR_HEIGHT, t.SKIP}:
+        height = None
+    else:
+        height = parse_height(raw)
+        if height is None:
+            await message.answer(t.INVALID_HEIGHT, reply_markup=height_edit_kb())
+            return
+    profile = await _profile_for_edit(session, message.from_user.id)
+    if not profile:
+        await message.answer(t.NO_PROFILE)
+        return
+    await ProfileRepo(session).update_fields(profile, height=height)
+    await _refresh_card(bot, state, session, message.from_user.id)
+    await state.clear()
+    await message.answer(t.EDIT_DONE)
 
 
 @router.message(EditProfile.photo, F.photo)
 async def edit_photo(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    bot: Bot,
-    config: Config,
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
-    profile = await require_profile(session, message.from_user.id)
+    profile = await _profile_for_edit(session, message.from_user.id)
     if not profile:
         await message.answer(t.NO_PROFILE)
         return
-    await ProfileRepo(session).update_fields(
-        profile, photo_file_id=message.photo[-1].file_id
-    )
-    await _after_edit(message, state, session, bot, config)
-
-
-@router.message(EditProfile.photo, F.text == t.CANCEL)
-async def edit_photo_cancel(
-    message: Message, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await _back_to_edit_chooser(message, state, config)
+    await ProfileRepo(session).update_fields(profile, photo_file_id=message.photo[-1].file_id)
+    await _refresh_card(bot, state, session, message.from_user.id)
+    await state.clear()
+    await message.answer(t.EDIT_DONE)
 
 
 @router.message(EditProfile.photo)
-async def edit_photo_invalid(message: Message) -> None:
-    await message.answer(t.NEED_PHOTO, reply_markup=edit_back_ikb())
+async def edit_photo_bad(message: Message, state: FSMContext, bot: Bot) -> None:
+    if message.text in {t.BTN_BACK, t.EDIT_KEEP}:
+        await _show_fields(bot, state)
+        await message.answer("Не менял.")
+        return
+    await message.answer(t.NEED_PHOTO, reply_markup=keep_kb())
 
 
 @router.message(StateFilter(EditProfile))
 async def edit_unexpected(message: Message) -> None:
-    await message.answer(t.FSM_NEED_TEXT)
+    await message.answer("Нужна кнопка под сообщением или текст, который просили. /cancel — в меню.")

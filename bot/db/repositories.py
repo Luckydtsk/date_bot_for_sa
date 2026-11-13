@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +34,7 @@ class ReactionOutcome:
 
     status: ReactionResult
     matched: bool = False
+    unmatched: bool = False
 
 
 class ProfileRepo:
@@ -155,8 +156,12 @@ class ProfileRepo:
             profile.username = username
             await self.session.commit()
 
-    async def list_catalog(self, viewer: Profile) -> list[Profile]:
-        """Все подходящие анкеты для просмотра (можно листать сколько угодно)."""
+    async def list_catalog(self, viewer: Profile, mode: str = "all") -> list[Profile]:
+        """Подходящие анкеты. mode: all | new | liked | nope.
+
+        Порядок стабильный (по id), чтобы «3 из 12» не прыгал.
+        Новые анкеты оказываются в конце, уже просмотренные остаются в списке.
+        """
         looking_back = or_(
             Profile.looking_for == "any",
             Profile.looking_for == viewer.gender,
@@ -174,6 +179,30 @@ class ProfileRepo:
         )
         if viewer.looking_for != "any":
             stmt = stmt.where(Profile.gender == viewer.looking_for)
+
+        if mode == "new":
+            reacted = select(Like.to_profile_id).where(Like.from_profile_id == viewer.id)
+            stmt = stmt.where(Profile.id.not_in(reacted))
+        elif mode == "liked":
+            stmt = stmt.join(
+                Like,
+                and_(
+                    Like.to_profile_id == Profile.id,
+                    Like.from_profile_id == viewer.id,
+                    Like.is_like.is_(True),
+                ),
+            )
+        elif mode == "nope":
+            stmt = stmt.join(
+                Like,
+                and_(
+                    Like.to_profile_id == Profile.id,
+                    Like.from_profile_id == viewer.id,
+                    Like.is_like.is_(False),
+                ),
+            )
+        elif mode != "all":
+            raise ValueError(f"unknown catalog mode: {mode}")
 
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
@@ -410,6 +439,32 @@ class MatchRepo:
             await self.session.rollback()
             existing = await self.get(a, b)
             return existing, False
+
+    async def delete_pair(self, a: int, b: int) -> bool:
+        match = await self.get(a, b)
+        if match is None:
+            return False
+        await self.session.delete(match)
+        await self.session.commit()
+        return True
+
+    async def partners(self, profile_id: int) -> list[Profile]:
+        rows = await self.session.execute(
+            select(Match).where(
+                or_(Match.profile1_id == profile_id, Match.profile2_id == profile_id)
+            )
+        )
+        other_ids = []
+        for match in rows.scalars():
+            other_ids.append(
+                match.profile2_id if match.profile1_id == profile_id else match.profile1_id
+            )
+        if not other_ids:
+            return []
+        result = await self.session.execute(
+            select(Profile).where(Profile.id.in_(other_ids)).order_by(Profile.name.asc())
+        )
+        return list(result.scalars().all())
 
 
 class StatsRepo:

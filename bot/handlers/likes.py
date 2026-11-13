@@ -1,161 +1,111 @@
+"""Кто лайкнул тебя и ещё ждёт ответ."""
+
 from aiogram import Bot, F, Router
-from aiogram.filters import StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts as t
-from bot.db.repositories import ProfileRepo
-from bot.keyboards.cleanup import clear_tracked_keyboards, track_keyboard_message
 from bot.config import Config
+from bot.db.models import Profile
+from bot.db.repositories import ProfileRepo
 from bot.keyboards.common import likes_kb, menu_for
-from bot.services import process_reaction, require_profile, send_profile_card
+from bot.services import can_see, deliver_photo, process_reaction, require_profile
 
 router = Router(name="likes")
 
 
-async def _show_incoming(
-    message: Message, session: AsyncSession, state: FSMContext, config: Config
-) -> None:
+async def _incoming(session: AsyncSession, viewer: Profile) -> list[Profile]:
+    rows = await ProfileRepo(session).incoming_likes(viewer)
+    return [profile for profile, _like in rows]
+
+
+async def open_likes(message: Message, session: AsyncSession, config: Config) -> None:
     viewer = await require_profile(session, message.from_user.id)
     if not viewer:
-        await message.answer(t.NO_PROFILE)
+        await message.answer(t.NO_PROFILE, reply_markup=menu_for(message.from_user.id, config))
         return
-
-    incoming = await ProfileRepo(session).incoming_likes(viewer)
-    if not incoming:
+    people = await _incoming(session, viewer)
+    if not people:
         await message.answer(t.LIKES_EMPTY, reply_markup=menu_for(message.from_user.id, config))
         return
+    await message.answer(
+        t.likes_intro(len(people)),
+        reply_markup=menu_for(message.from_user.id, config),
+    )
+    await _send(message, people[0], index=1, total=len(people))
 
-    profile, _like = incoming[0]
-    await state.update_data(likes_current_id=profile.id)
-    sent = await send_profile_card(
+
+async def _send(message: Message, profile: Profile, *, index: int, total: int) -> None:
+    await deliver_photo(
         message,
-        profile,
-        reply_markup=likes_kb(profile.id),
-        prefix=t.LIKES_HEADER + "\n\n",
+        profile.photo_file_id,
+        t.likes_caption(profile, index=index, total=total),
+        likes_kb(profile.id),
     )
-    await track_keyboard_message(state, sent)
 
 
-@router.message(StateFilter(default_state), F.text == t.BTN_LIKES_ME)
-async def likes_me(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
+async def _ack(callback: CallbackQuery, text: str = "", *, alert: bool = False) -> None:
+    try:
+        await callback.answer(text, show_alert=alert)
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "in:c")
+async def likes_close(callback: CallbackQuery) -> None:
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await _ack(callback, t.TOAST_CLOSED)
+
+
+@router.callback_query(F.data.startswith("in:"))
+async def likes_answer(
+    callback: CallbackQuery, session: AsyncSession, bot: Bot, config: Config
 ) -> None:
-    await start_likes_me(message, state, session, bot, config)
-
-
-async def start_likes_me(
-    message: Message, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
-) -> None:
-    await clear_tracked_keyboards(bot, message.chat.id, state)
-    await state.clear()
-    await _show_incoming(message, session, state, config)
-
-
-@router.callback_query(F.data == "likes:menu")
-async def likes_menu(
-    callback: CallbackQuery, state: FSMContext, bot: Bot, config: Config
-) -> None:
-    if not callback.message:
-        await callback.answer()
+    if callback.message is None:
+        await _ack(callback)
         return
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
-    )
-    await state.clear()
-    await callback.message.answer(
-        t.MENU_TITLE, reply_markup=menu_for(callback.from_user.id, config)
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("likes:"))
-async def likes_action(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot, config: Config
-) -> None:
-    if not callback.message:
-        await callback.answer()
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or parts[1] not in {"y", "x"} or not parts[2].isdigit():
+        await _ack(callback, t.STALE_BUTTON, alert=True)
         return
-
-    parts = callback.data.split(":")
-    if len(parts) < 2:
-        await callback.answer()
-        return
-    action = parts[1]
-    if action == "menu":
-        return
-
-    if len(parts) != 3 or action not in {"like", "skip"}:
-        await callback.answer()
-        return
-
-    target_id = int(parts[2])
     viewer = await require_profile(session, callback.from_user.id)
     if not viewer:
-        await callback.answer(t.NO_PROFILE, show_alert=True)
+        await _ack(callback, t.NO_PROFILE, alert=True)
+        return
+    target = await ProfileRepo(session).get_by_id(int(parts[2]))
+    if not can_see(viewer, target) or target is None:
+        await _ack(callback, t.TOAST_GONE, alert=True)
+        return
+    if not await ProfileRepo(session).has_pending_incoming_like(viewer.id, target.id):
+        await _ack(callback, t.TOAST_SAME)
         return
 
-    repo = ProfileRepo(session)
-    # Только если человек реально в «входящих» и ответа ещё нет
-    if not await repo.has_pending_incoming_like(viewer.id, target_id):
-        await callback.answer("Уже обработано", show_alert=True)
-        await clear_tracked_keyboards(
-            bot, callback.message.chat.id, state, also=callback.message
-        )
-        incoming = await repo.incoming_likes(viewer)
-        if not incoming:
-            await callback.message.answer(
-                t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config)
-            )
-            return
-        profile, _ = incoming[0]
-        await state.update_data(likes_current_id=profile.id)
-        sent = await send_profile_card(
-            callback.message,
-            profile,
-            reply_markup=likes_kb(profile.id),
-            prefix=t.LIKES_HEADER + "\n\n",
-        )
-        await track_keyboard_message(state, sent)
-        return
-
-    target = await repo.get_by_id(target_id)
-    if not target:
-        await callback.answer("Анкета недоступна", show_alert=True)
-        return
-
-    await clear_tracked_keyboards(
-        bot, callback.message.chat.id, state, also=callback.message
+    outcome = await process_reaction(
+        bot, session, viewer, target, is_like=(parts[1] == "y")
     )
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
 
-    if action == "like":
-        outcome = await process_reaction(bot, session, viewer, target, is_like=True)
-        if outcome.status == "rejected":
-            await callback.answer(t.LIKE_REJECTED, show_alert=True)
-        elif outcome.status == "exists":
-            await callback.answer(t.LIKE_ALREADY, show_alert=True)
-        else:
-            await callback.answer(t.LIKE_SENT)
+    if outcome.matched:
+        toast, alert = t.TOAST_MATCH, True
+    elif outcome.status == "rejected":
+        toast, alert = t.TOAST_GONE, True
+    elif parts[1] == "y":
+        toast, alert = t.TOAST_LIKE, False
     else:
-        await process_reaction(bot, session, viewer, target, is_like=False)
-        await callback.answer(t.DISLIKE_DONE)
+        toast, alert = t.TOAST_NOPE, False
 
-    incoming = await repo.incoming_likes(viewer)
-    if not incoming:
-        await state.update_data(likes_current_id=None)
+    people = await _incoming(session, viewer)
+    if people:
+        await _send(callback.message, people[0], index=1, total=len(people))
+    else:
         await callback.message.answer(
             t.LIKES_EMPTY, reply_markup=menu_for(callback.from_user.id, config)
         )
-        return
-
-    profile, _like = incoming[0]
-    await state.update_data(likes_current_id=profile.id)
-    sent = await send_profile_card(
-        callback.message,
-        profile,
-        reply_markup=likes_kb(profile.id),
-        prefix=t.LIKES_HEADER + "\n\n",
-    )
-    await track_keyboard_message(state, sent)
+    await _ack(callback, toast, alert=alert)

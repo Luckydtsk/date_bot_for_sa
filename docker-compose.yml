@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    environment:
+      # Файл лежит в томе. Пересоздание контейнера базу не стирает.
+      DATABASE_URL: sqlite+aiosqlite:///./data/ball_bot.db
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
