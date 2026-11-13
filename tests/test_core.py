@@ -143,6 +143,7 @@ def test_menu_buttons_do_not_repeat_and_callbacks_fit():
     assert t.FEED_NEXT in feed
     assert t.BTN_LIKE in feed
     assert t.BTN_NOPE in feed
+    assert t.FEED_ALL in feed
     assert t.FEED_LIKED in feed
     assert t.FEED_DISLIKED in feed
     assert t.BTN_WRITE not in feed

@@ -38,6 +38,23 @@ _FILTERS = {
 }
 
 
+def _filter_mode(text: str | None) -> str | None:
+    if not text:
+        return None
+    if text.startswith(t.FEED_MARK):
+        text = text[len(t.FEED_MARK) :]
+    return _FILTERS.get(text)
+
+
+async def _arm_keyboard(message: Message) -> None:
+    """Панель только при входе в анкеты, до карточки. На «Мои» и «Все» заново не шлём."""
+    previous = _feed_keys.get(message.chat.id)
+    sent = await message.answer("\u2060", reply_markup=feed_controls_kb())
+    _feed_keys[message.chat.id] = sent.message_id
+    if previous and previous != sent.message_id:
+        await discard(message.bot, message.chat.id, previous)
+
+
 async def _ids(session: AsyncSession, viewer: Profile, mode: str) -> list[int]:
     rows = await ProfileRepo(session).list_catalog(viewer, mode)
     return [row.id for row in rows]
@@ -93,19 +110,27 @@ async def _paint(
     old_id: int | None,
     profile: Profile,
     caption: str,
+    *,
+    kind: str | None,
 ) -> int | None:
     """Правит уже открытую анкету. Новое фото — только когда карточки ещё нет.
 
     На фото нельзя вешать нижнюю клавиатуру: с ней Telegram не даёт править сообщение.
+    Пустой текст тоже можно снова сделать фото.
     """
     if old_id:
         media = InputMediaPhoto(media=profile.photo_file_id, caption=caption, parse_mode="HTML")
         try:
             await bot.edit_message_media(chat_id=chat_id, message_id=int(old_id), media=media)
+            return int(old_id)
         except TelegramBadRequest as exc:
-            if "not modified" not in str(exc).lower():
+            if "not modified" in str(exc).lower():
+                return int(old_id)
+            if kind == "text":
+                await discard(bot, chat_id, int(old_id))
+            else:
                 logger.warning("Анкету не поправил: %s", exc)
-        return int(old_id)
+                return int(old_id)
     sent = await bot.send_photo(
         chat_id,
         photo=profile.photo_file_id,
@@ -118,7 +143,13 @@ async def _paint(
 async def _remember(
     state: FSMContext, *, mode: str, profile_id: int | None, message_id: int | None
 ) -> None:
-    await state.update_data(mode=mode, profile_id=profile_id, card_id=message_id, notice_id=None)
+    await state.update_data(
+        mode=mode,
+        profile_id=profile_id,
+        card_id=message_id,
+        card_kind="photo",
+        notice_id=None,
+    )
 
 
 async def _show(
@@ -145,7 +176,9 @@ async def _show(
     caption = await _caption(
         session, viewer, profile, index=index + 1, total=len(ids), mode=mode, note=note
     )
-    card_id = await _paint(bot, chat_id, data.get("card_id"), profile, caption)
+    card_id = await _paint(
+        bot, chat_id, data.get("card_id"), profile, caption, kind=data.get("card_kind")
+    )
     if card_id is None:
         return
     await _remember(state, mode=mode, profile_id=profile.id, message_id=card_id)
@@ -153,18 +186,24 @@ async def _show(
 
 async def _empty(bot: Bot, chat_id: int, state: FSMContext, mode: str, *, card_id: int | None) -> None:
     text = EMPTY_BY_MODE.get(mode, t.FEED_EMPTY_ALL)
-    if card_id:
+    data = await state.get_data()
+    if card_id and data.get("card_kind") == "text":
         try:
-            await bot.edit_message_caption(
-                chat_id=chat_id, message_id=int(card_id), caption=text
-            )
+            await bot.edit_message_text(chat_id=chat_id, message_id=int(card_id), text=text)
         except TelegramBadRequest as exc:
             if "not modified" not in str(exc).lower():
-                logger.warning("Пустую подборку не вписал в ту же анкету: %s", exc)
-        await state.update_data(mode=mode, profile_id=None, card_id=card_id, notice_id=None)
+                logger.warning("Пустую подборку не вписал: %s", exc)
+        await state.update_data(
+            mode=mode, profile_id=None, card_id=card_id, card_kind="text", notice_id=None
+        )
         return
+    # У фото нельзя убрать картинку правкой. Стираем его и оставляем только текст.
+    if card_id:
+        await discard(bot, chat_id, int(card_id))
     sent = await bot.send_message(chat_id, text)
-    await state.update_data(mode=mode, profile_id=None, card_id=sent.message_id, notice_id=None)
+    await state.update_data(
+        mode=mode, profile_id=None, card_id=sent.message_id, card_kind="text", notice_id=None
+    )
 
 
 async def open_feed(
@@ -191,17 +230,13 @@ async def open_feed(
         mode="all",
         profile_id=None,
         card_id=None,
+        card_kind=None,
         press_id=message.message_id,
         notice_id=None,
     )
-    # Панель живёт на отдельном сообщении: на фото её вешать нельзя, фото тогда не правится.
-    # Это сообщение не стираем — иначе пропадают нижние кнопки.
-    previous = _feed_keys.get(message.chat.id)
-    keyboard = await message.answer("\u2060", reply_markup=feed_controls_kb())
-    _feed_keys[message.chat.id] = keyboard.message_id
+    # Панель на отдельном сообщении: на фото её вешать нельзя, фото тогда не правится.
+    await _arm_keyboard(message)
     await _show(message.bot, message.chat.id, state, session, viewer, ids[0], "all", note=note)
-    if previous and previous != keyboard.message_id:
-        await discard(message.bot, message.chat.id, previous)
 
 
 async def _viewer(session: AsyncSession, message: Message) -> Profile | None:
@@ -221,6 +256,18 @@ async def feed_move(message: Message, session: AsyncSession, state: FSMContext) 
     if not ids:
         await _empty(message.bot, message.chat.id, state, mode, card_id=data.get("card_id"))
         return
+    if len(ids) == 1:
+        await _show(
+            message.bot,
+            message.chat.id,
+            state,
+            session,
+            viewer,
+            ids[0],
+            mode,
+            note=t.FEED_ONLY_ONE,
+        )
+        return
     current = data.get("profile_id")
     if current not in ids:
         target = ids[0]
@@ -230,14 +277,14 @@ async def feed_move(message: Message, session: AsyncSession, state: FSMContext) 
     await _show(message.bot, message.chat.id, state, session, viewer, target, mode)
 
 
-@router.message(Feed.browsing, F.text.in_(_FILTERS))
+@router.message(Feed.browsing, F.text.func(lambda text: _filter_mode(text) is not None))
 async def feed_filter(message: Message, session: AsyncSession, state: FSMContext) -> None:
     data = await _shift_press(message, state)
     viewer = await _viewer(session, message)
     if not viewer:
         await message.answer(t.NO_PROFILE)
         return
-    mode = _FILTERS[message.text or ""]
+    mode = _filter_mode(message.text) or "all"
     ids = await _ids(session, viewer, mode)
     if not ids:
         await _empty(message.bot, message.chat.id, state, mode, card_id=data.get("card_id"))

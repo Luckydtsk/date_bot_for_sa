@@ -37,6 +37,7 @@ FEED_NEXT = "Дальше →"
 FEED_ALL = "Все"
 FEED_LIKED = "Мои ❤️"
 FEED_DISLIKED = "Мои 👎"
+FEED_MARK = "✓ "
 
 BTN_ADMIN_STATS = "📊 Статистика"
 BTN_ADMIN_USERS = "👥 Список анкет"
@@ -82,6 +83,9 @@ RESERVED_INPUTS = MENU_BUTTONS | {
     FEED_ALL,
     FEED_LIKED,
     FEED_DISLIKED,
+    FEED_MARK + FEED_ALL,
+    FEED_MARK + FEED_LIKED,
+    FEED_MARK + FEED_DISLIKED,
     BTN_LIKE,
     BTN_NOPE,
 }
@@ -237,6 +241,7 @@ def feed_intro(total: int, fresh: int, *, hidden: bool) -> str:
     return text
 
 
+FEED_ONLY_ONE = "Тут одна анкета."
 FEED_EMPTY_ALL = "Пока нет подходящих анкет. Они появятся, когда кто-то заполнит свою."
 FEED_EMPTY_NEW = "Новых нет. «Все» — пересмотреть и поменять решение."
 FEED_EMPTY_LIKED = "Пока никому не поставил ❤️."
