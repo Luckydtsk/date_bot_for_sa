@@ -62,6 +62,15 @@ class Profile(Base):
     )
 
 
+class AdminPref(Base):
+    """Включены ли у организатора уведомления о новых людях и парах."""
+
+    __tablename__ = "admin_prefs"
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    notify: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Like(Base):
     __tablename__ = "likes"
     __table_args__ = (UniqueConstraint("from_profile_id", "to_profile_id", name="uq_like_pair"),)

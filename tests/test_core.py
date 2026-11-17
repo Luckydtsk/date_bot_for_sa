@@ -8,7 +8,7 @@ import pytest
 
 from bot import texts as t
 from bot.config import safe_db_label
-from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo
+from bot.db.repositories import AdminPrefRepo, LikeRepo, MatchRepo, ProfileRepo
 from bot.db.session import init_db, make_engine, make_session_factory
 from bot.education import format_group, intake_year_short
 from bot.handlers import setup_routers
@@ -248,6 +248,58 @@ async def test_like_can_be_changed_and_match_comes_off(session):
     assert restored.matched is True
     assert await MatchRepo(session).partners(ilya.id)
     assert not can_see(ilya, ilya)
+
+
+async def test_journal_shows_likes_dislikes_and_pairs(session):
+    ilya = await add(session, 1, "male", name="Илья", username="ilya")
+    anya = await add(session, 2, "female", name="Аня", username="anya")
+    bot = FakeBot()
+
+    await process_reaction(bot, session, ilya, anya, is_like=True)
+    await process_reaction(bot, session, anya, ilya, is_like=True)
+    like_total, likes = await LikeRepo(session).journal(is_like=True, offset=0, limit=10)
+    pair_total, pairs = await MatchRepo(session).journal(offset=0, limit=10)
+    assert like_total == 2
+    assert {src.name for src, _, _ in likes} == {"Илья", "Аня"}
+    assert pair_total == 1
+    assert {pairs[0][0].name, pairs[0][1].name} == {"Илья", "Аня"}
+
+    await process_reaction(bot, session, ilya, anya, is_like=False)
+    nope_total, nopes = await LikeRepo(session).journal(is_like=False, offset=0, limit=10)
+    like_total, _ = await LikeRepo(session).journal(is_like=True, offset=0, limit=10)
+    pair_total, _ = await MatchRepo(session).journal(offset=0, limit=10)
+    assert nope_total == 1
+    assert nopes[0][0].name == "Илья" and nopes[0][1].name == "Аня"
+    assert like_total == 1
+    assert pair_total == 0
+
+
+async def test_admin_hears_a_new_pair_only_when_notify_is_on(session, monkeypatch):
+    monkeypatch.setattr("bot.services.admin_ids", lambda: frozenset({777}))
+    ilya = await add(session, 1, "male", name="Илья")
+    anya = await add(session, 2, "female", name="Аня")
+    bot = FakeBot()
+
+    await process_reaction(bot, session, ilya, anya, is_like=True)
+    await process_reaction(bot, session, anya, ilya, is_like=True)
+    assert not any(item[1] == 777 for item in bot.out)
+
+    assert await AdminPrefRepo(session).toggle(777) is True
+    boris = await add(session, 3, "male", name="Борис")
+    vera = await add(session, 4, "female", name="Вера")
+    await process_reaction(bot, session, boris, vera, is_like=True)
+    await process_reaction(bot, session, vera, boris, is_like=True)
+    notes = [item[2] for item in bot.out if item[0] == "message" and item[1] == 777]
+    assert len(notes) == 1
+    assert notes[0].startswith("Появилась пара:")
+    assert "Борис" in notes[0] and "Вера" in notes[0]
+
+    assert await AdminPrefRepo(session).toggle(777) is False
+    kirill = await add(session, 5, "male", name="Кирилл")
+    olga = await add(session, 6, "female", name="Оля")
+    await process_reaction(bot, session, kirill, olga, is_like=True)
+    await process_reaction(bot, session, olga, kirill, is_like=True)
+    assert [item[2] for item in bot.out if item[0] == "message" and item[1] == 777] == notes
 
 
 async def test_same_gender_like_is_rejected(session):

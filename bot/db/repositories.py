@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
 
 from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy.orm import aliased
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.db.models import Like, Match, Profile
+from bot.db.models import AdminPref, Like, Match, Profile
 
 ReactionResult = Literal["created", "updated", "exists", "rejected"]
 
@@ -35,6 +37,28 @@ class ReactionOutcome:
     status: ReactionResult
     matched: bool = False
     unmatched: bool = False
+
+
+class AdminPrefRepo:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def toggle(self, telegram_id: int) -> bool:
+        """Первый вызов включает. Дальше переключает. Возвращает новое состояние."""
+        row = await self.session.get(AdminPref, telegram_id)
+        if row is None:
+            self.session.add(AdminPref(telegram_id=telegram_id, notify=True))
+            await self.session.commit()
+            return True
+        row.notify = not row.notify
+        await self.session.commit()
+        return row.notify
+
+    async def enabled_ids(self) -> list[int]:
+        result = await self.session.execute(
+            select(AdminPref.telegram_id).where(AdminPref.notify.is_(True))
+        )
+        return [int(item) for item in result.scalars().all()]
 
 
 class ProfileRepo:
@@ -398,6 +422,26 @@ class LikeRepo:
             await self.session.refresh(existing)
             return AddLikeResult(like=existing, status="updated")
 
+    async def journal(
+        self, *, is_like: bool, offset: int, limit: int
+    ) -> tuple[int, list[tuple[Profile, Profile, datetime | None]]]:
+        """Текущие лайки или дизлайки, новые сверху. (кто, кому, когда)."""
+        total = await self.session.scalar(
+            select(func.count()).select_from(Like).where(Like.is_like.is_(is_like))
+        )
+        src = aliased(Profile)
+        dst = aliased(Profile)
+        result = await self.session.execute(
+            select(src, dst, Like.created_at)
+            .join(src, src.id == Like.from_profile_id)
+            .join(dst, dst.id == Like.to_profile_id)
+            .where(Like.is_like.is_(is_like))
+            .order_by(Like.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return total or 0, [(a, b, when) for a, b, when in result.all()]
+
     async def has_mutual_like(self, a: int, b: int) -> bool:
         like_ab = await self.get(a, b)
         like_ba = await self.get(b, a)
@@ -447,6 +491,23 @@ class MatchRepo:
         await self.session.delete(match)
         await self.session.commit()
         return True
+
+    async def journal(
+        self, *, offset: int, limit: int
+    ) -> tuple[int, list[tuple[Profile, Profile, datetime | None]]]:
+        """Текущие пары, новые сверху."""
+        total = await self.session.scalar(select(func.count()).select_from(Match))
+        left = aliased(Profile)
+        right = aliased(Profile)
+        result = await self.session.execute(
+            select(left, right, Match.created_at)
+            .join(left, left.id == Match.profile1_id)
+            .join(right, right.id == Match.profile2_id)
+            .order_by(Match.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return total or 0, [(a, b, when) for a, b, when in result.all()]
 
     async def partners(self, profile_id: int) -> list[Profile]:
         rows = await self.session.execute(

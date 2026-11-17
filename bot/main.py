@@ -31,6 +31,8 @@ ADMIN_COMMANDS = USER_COMMANDS + [
     BotCommand(command="stats", description="Статистика"),
     BotCommand(command="users", description="Список анкет"),
     BotCommand(command="broadcast", description="Рассылка"),
+    BotCommand(command="log", description="Лайки, дизлайки и пары"),
+    BotCommand(command="notify", description="Toggle alerts"),
 ]
 
 

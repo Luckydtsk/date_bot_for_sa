@@ -231,8 +231,40 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text=t.BTN_ADMIN_BAN, callback_data="admin:ask:ban"),
                 InlineKeyboardButton(text=t.BTN_ADMIN_UNBAN, callback_data="admin:ask:unban"),
             ],
+            [InlineKeyboardButton(text=t.BTN_ADMIN_LOG, callback_data="admin:log")],
         ]
     )
+
+
+def admin_log_kb(kind: str, *, offset: int, total: int, page: int) -> InlineKeyboardMarkup:
+    """Журнал: лайки, дизлайки, пары. Галка на открытой вкладке."""
+
+    def tab(code: str, label: str) -> InlineKeyboardButton:
+        mark = "✓ " if kind == code else ""
+        return InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"admin:log:{code}:0")
+
+    rows: list[list[InlineKeyboardButton]] = [
+        [tab("like", "❤️"), tab("nope", "👎"), tab("pair", "✨ Пары")],
+    ]
+    nav: list[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="← Назад",
+                callback_data=f"admin:log:{kind}:{max(0, offset - page)}",
+            )
+        )
+    if offset + page < total:
+        nav.append(
+            InlineKeyboardButton(
+                text="Далее →",
+                callback_data=f"admin:log:{kind}:{offset + page}",
+            )
+        )
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text=t.LOG_BACK, callback_data="admin:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def admin_pick_kb() -> InlineKeyboardMarkup:

@@ -1,6 +1,8 @@
 """Админка организатора. Кнопки под сообщением, меню участника остаётся внизу."""
 
 import asyncio
+import html
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
@@ -11,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import texts as t
 from bot.config import Config
 from bot.db.models import Profile
-from bot.db.repositories import ProfileRepo, StatsRepo
-from bot.keyboards.common import admin_panel_kb, admin_pick_kb, is_admin
+from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo, StatsRepo
+from bot.keyboards.common import admin_log_kb, admin_panel_kb, admin_pick_kb, is_admin
 from bot.live_buttons import answer_inline
 from bot.services import deliver_photo
 from bot.states.profile import AdminBroadcast, AdminPickUser
@@ -20,7 +22,9 @@ from bot.states.profile import AdminBroadcast, AdminPickUser
 router = Router(name="admin")
 
 _PAGE = 10
+_LOG_PAGE = 8
 _ACTIONS = frozenset({"view", "ban", "unban"})
+_LOGS = frozenset({"like", "nope", "pair"})
 
 
 def _gender(gender: str) -> str:
@@ -95,6 +99,46 @@ async def _resolve(session: AsyncSession, raw: str) -> Profile | None:
     if raw.isdigit():
         return await repo.get_by_tg(int(raw))
     return await repo.get_by_username(raw)
+
+
+def _when(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    if value.tzinfo is not None:
+        value = value.astimezone()
+    return value.strftime("%d.%m %H:%M")
+
+
+def _who(profile: Profile) -> str:
+    nick = f" @{profile.username}" if profile.username else ""
+    return html.escape(f"{profile.name}{nick}")
+
+
+async def _journal(message: Message, session: AsyncSession, *, kind: str, offset: int) -> None:
+    if kind == "pair":
+        total, rows = await MatchRepo(session).journal(offset=offset, limit=_LOG_PAGE)
+        title = t.LOG_PAIR
+        empty = t.LOG_EMPTY_PAIR
+        lines = [
+            f"{n}. {_who(left)} и {_who(right)}" + (f" · {_when(when)}" if when else "")
+            for n, (left, right, when) in enumerate(rows, start=offset + 1)
+        ]
+    else:
+        total, rows = await LikeRepo(session).journal(
+            is_like=kind == "like", offset=offset, limit=_LOG_PAGE
+        )
+        title = t.LOG_LIKE if kind == "like" else t.LOG_NOPE
+        empty = t.LOG_EMPTY_LIKE if kind == "like" else t.LOG_EMPTY_NOPE
+        lines = [
+            f"{n}. {_who(src)} → {_who(dst)}" + (f" · {_when(when)}" if when else "")
+            for n, (src, dst, when) in enumerate(rows, start=offset + 1)
+        ]
+    markup = admin_log_kb(kind, offset=offset, total=total, page=_LOG_PAGE)
+    if not rows:
+        await answer_inline(message, empty, markup)
+        return
+    text = title.format(start=offset + 1, end=offset + len(rows), total=total) + "\n\n" + "\n".join(lines)
+    await answer_inline(message, text, markup, parse_mode="HTML")
 
 
 async def _stats(message: Message, session: AsyncSession) -> None:
@@ -218,6 +262,37 @@ async def admin_cancel(callback: CallbackQuery, state: FSMContext, config: Confi
             callback.message, t.ADMIN_PANEL_TITLE, admin_panel_kb(), parse_mode="HTML"
         )
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin:log")
+async def cb_log(callback: CallbackQuery, session: AsyncSession, config: Config) -> None:
+    if not _guard(callback.from_user.id, config) or callback.message is None:
+        await callback.answer(t.ADMIN_ONLY, show_alert=True)
+        return
+    await _journal(callback.message, session, kind="like", offset=0)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:log:"))
+async def cb_log_page(callback: CallbackQuery, session: AsyncSession, config: Config) -> None:
+    if not _guard(callback.from_user.id, config) or callback.message is None:
+        await callback.answer(t.ADMIN_ONLY, show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4 or parts[2] not in _LOGS or not parts[3].isdigit():
+        await callback.answer()
+        return
+    await _journal(callback.message, session, kind=parts[2], offset=int(parts[3]))
+    await callback.answer()
+
+
+@router.message(Command("log"))
+async def cmd_log(message: Message, state: FSMContext, session: AsyncSession, config: Config) -> None:
+    if not _guard(message.from_user.id, config):
+        await message.answer(t.ADMIN_ONLY)
+        return
+    await state.clear()
+    await _journal(message, session, kind="like", offset=0)
 
 
 @router.callback_query(F.data == "admin:stats")

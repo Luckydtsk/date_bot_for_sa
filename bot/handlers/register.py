@@ -306,6 +306,7 @@ async def _finish(
         await message.answer("Анкета собралась не до конца. Нажми «Старт» и начнём с имени.")
         await state.clear()
         return
+    fresh = await ProfileRepo(session).get_by_tg(message.from_user.id) is None
     profile = await ProfileRepo(session).upsert_complete(
         message.from_user.id,
         username=message.from_user.username,
@@ -334,3 +335,12 @@ async def _finish(
     )
     if not message.from_user.username:
         await message.answer(t.USERNAME_HINT)
+    if fresh:
+        from bot.services import _who, notify_admins
+
+        await notify_admins(
+            message.bot,
+            session,
+            t.NOTIFY_NEW.format(who=_who(profile)),
+            skip={message.from_user.id},
+        )

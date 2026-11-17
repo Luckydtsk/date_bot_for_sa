@@ -165,6 +165,17 @@ async def menu_profile(
     await open_my_profile(message, session, config)
 
 
+@router.message(Command("notify"))
+async def cmd_notify(message: Message, session: AsyncSession, config: Config) -> None:
+    if not is_admin(message.from_user.id, config):
+        await message.answer(t.ADMIN_ONLY)
+        return
+    from bot.db.repositories import AdminPrefRepo
+
+    enabled = await AdminPrefRepo(session).toggle(message.from_user.id)
+    await message.answer(t.NOTIFY_ON if enabled else t.NOTIFY_OFF)
+
+
 @router.message(F.text == t.BTN_ADMIN)
 @router.message(Command("admin"))
 async def menu_admin(

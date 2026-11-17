@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts as t
 from bot.db.models import Profile
-from bot.db.repositories import LikeRepo, MatchRepo, ProfileRepo, ReactionOutcome
+from bot.db.repositories import AdminPrefRepo, LikeRepo, MatchRepo, ProfileRepo, ReactionOutcome
 from bot.live_buttons import arm
 
 logger = logging.getLogger(__name__)
@@ -149,6 +149,39 @@ async def send_profile_card(
     return await deliver_photo(message, profile.photo_file_id, caption, reply_markup)
 
 
+def admin_ids() -> frozenset[int]:
+    try:
+        from bot.config import load_config
+
+        return load_config().admin_ids
+    except Exception:
+        return frozenset()
+
+
+def _who(profile: Profile) -> str:
+    if profile.username:
+        return f"{profile.name} @{profile.username}"
+    return profile.name
+
+
+async def notify_admins(bot, session: AsyncSession, text: str, *, skip: set[int] | None = None) -> None:
+    """Пишет только админам, которые сами включили /notify. Ошибка одному остальных не останавливает."""
+    skip = skip or set()
+    try:
+        allowed = admin_ids()
+        targets = await AdminPrefRepo(session).enabled_ids()
+    except Exception:
+        logger.exception("Не собрал список админов для уведомления")
+        return
+    for tg_id in targets:
+        if tg_id not in allowed or tg_id in skip:
+            continue
+        try:
+            await bot.send_message(tg_id, text)
+        except Exception:
+            logger.info("Админу не ушло уведомление tg=%s", tg_id)
+
+
 async def notify_match(
     bot, session: AsyncSession, a: Profile, b: Profile, *, quiet_for: int | None = None
 ) -> None:
@@ -177,6 +210,12 @@ async def notify_match(
                 )
             except Exception:
                 logger.warning("Пара текстом тоже не ушла tg=%s", me.telegram_id)
+    await notify_admins(
+        bot,
+        session,
+        t.NOTIFY_PAIR.format(left=_who(a), right=_who(b)),
+        skip={a.telegram_id, b.telegram_id},
+    )
 
 
 async def process_reaction(
